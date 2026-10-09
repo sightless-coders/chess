@@ -83,6 +83,24 @@ string square_name(int idx) {
 	return files.substr(idx % 8, 1) + ranks.substr(idx / 8, 1);
 }
 
+const int ASCII_A = 97;
+const int ASCII_H = 104;
+const int ASCII_1 = 49;
+const int ASCII_8 = 56;
+
+int square_index(const string&in name) {
+	if (name.length() != 2) return -1;
+	string file_str = name.substr(0, 1);
+	string rank_str = name.substr(1, 1);
+	int file_char = character_to_ascii(file_str);
+	int rank_char = character_to_ascii(rank_str);
+	if (file_char < ASCII_A || file_char > ASCII_H) return -1;
+	if (rank_char < ASCII_1 || rank_char > ASCII_8) return -1;
+	int f = file_char - ASCII_A;
+	int r = 8 - (rank_char - ASCII_1);
+	return r * 8 + f;
+}
+
 string piece_words(int p) {
 	string color = piece_is_white(p) ? "white" : "black";
 	int t = piece_type(p);

@@ -54,6 +54,7 @@ public class MainActivity extends Activity {
     private static final int MODE_NORMAL = 2;
     private static final int MODE_HARD = 3;
     private static final int MODE_ONLINE = 4;
+    private static final int MODE_COMMAND_LINE = 5;
 
     // The computer plays black.
     private static final boolean AI_IS_BLACK = true;
@@ -544,6 +545,10 @@ public class MainActivity extends Activity {
 
     private void newGame(int mode) {
         if (aiThinking) return; // the engine is busy; don't yank the board away
+        if (mode == MODE_COMMAND_LINE) {
+            startCommandLineMode();
+            return;
+        }
         vsComputer = mode != MODE_TWO_PLAYERS && mode != MODE_ONLINE;
         vsOnline = mode == MODE_ONLINE;
         switch (mode) {
@@ -586,8 +591,9 @@ public class MainActivity extends Activity {
                 "Computer — Hard",
                 "Two players (local)",
                 "Online matchmaking",
+                "Command line mode (50 pts)",
         };
-        final int[] modes = { MODE_EASY, MODE_NORMAL, MODE_HARD, MODE_TWO_PLAYERS, MODE_ONLINE };
+        final int[] modes = { MODE_EASY, MODE_NORMAL, MODE_HARD, MODE_TWO_PLAYERS, MODE_ONLINE, MODE_COMMAND_LINE };
         new AlertDialog.Builder(this)
                 .setTitle("New game")
                 .setItems(choices, new DialogInterface.OnClickListener() {
@@ -595,6 +601,8 @@ public class MainActivity extends Activity {
                     public void onClick(DialogInterface dialog, int which) {
                         if (modes[which] == MODE_ONLINE) {
                             startOnlineMatchmaking();
+                        } else if (modes[which] == MODE_COMMAND_LINE) {
+                            startCommandLineMode();
                         } else {
                             newGame(modes[which]);
                         }
@@ -602,7 +610,241 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
-        feedback("New game. Choose opponent: computer easy, normal, hard, two players, or online.");
+        feedback("New game. Choose opponent: computer easy, normal, hard, two players, online, or command line mode.");
+    }
+
+    private void startCommandLineMode() {
+        if (!authRepository.isLoggedIn()) {
+            setStatus("Please sign in to play command line mode.");
+            return;
+        }
+        vsComputer = false;
+        vsOnline = false;
+        clockEnabled = false;
+        board.reset();
+        history.clear();
+        lastMove = null;
+        gameOver = false;
+        boardView.setLastMove(null);
+        boardView.clearSelection();
+        boardView.refresh();
+        boardView.setInputEnabled(false); // No touch input in command line mode
+        setStatus("Command line mode. Enter moves like e4, Nf3, 0-0, e8=Q. Use keyboard to type moves.");
+        showCommandLineInputDialog();
+    }
+
+    private void showCommandLineInputDialog() {
+        if (gameOver) return;
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Your move (" + (board.whiteToMove ? "White" : "Black") + ")");
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setHint("e.g., e4, Nf3, 0-0, e8=Q, undo, quit");
+        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        builder.setView(input);
+        builder.setPositiveButton("Play", (dialog, which) -> {
+            String moveStr = input.getText().toString().trim().toLowerCase();
+            if (moveStr.isEmpty()) {
+                showCommandLineInputDialog();
+                return;
+            }
+            handleCommandLineMove(moveStr);
+        });
+        builder.setNegativeButton("Quit", (dialog, which) -> {
+            gameOver = true;
+            setStatus("Exited command line mode.");
+        });
+        builder.setOnCancelListener(dialog -> {
+            gameOver = true;
+            setStatus("Exited command line mode.");
+        });
+        builder.show();
+    }
+
+    private void handleCommandLineMove(String moveStr) {
+        if (moveStr.equals("quit") || moveStr.equals("exit") || moveStr.equals("q")) {
+            gameOver = true;
+            setStatus("Exited command line mode.");
+            return;
+        }
+        if (moveStr.equals("help") || moveStr.equals("?")) {
+            setStatus("Commands: e4, Nf3, 0-0, 0-0-0, e8=Q, undo, board, quit");
+            showCommandLineInputDialog();
+            return;
+        }
+        if (moveStr.equals("board") || moveStr.equals("b")) {
+            boardView.refresh();
+            showCommandLineInputDialog();
+            return;
+        }
+        if (moveStr.equals("undo") || moveStr.equals("u")) {
+            if (history.size() >= 2) {
+                board.unmake(history.remove(history.size() - 1));
+                board.unmake(history.remove(history.size() - 1));
+                boardView.refresh();
+                setStatus("Move taken back.");
+            } else {
+                setStatus("Nothing to undo.");
+            }
+            showCommandLineInputDialog();
+            return;
+        }
+
+        Move m = parseAlgebraicMove(moveStr);
+        if (m == null) {
+            setStatus("Invalid move: " + moveStr);
+            showCommandLineInputDialog();
+            return;
+        }
+
+        // Check if move is legal
+        List<Move> legalMoves = board.legalMoves();
+        boolean moveLegal = false;
+        for (Move legalMove : legalMoves) {
+            if (legalMove.from == m.from && legalMove.to == m.to && (legalMove.promotion == m.promotion || m.promotion == 0)) {
+                m = legalMove;
+                moveLegal = true;
+                break;
+            }
+        }
+        if (!moveLegal) {
+            setStatus("Illegal move: " + moveStr);
+            showCommandLineInputDialog();
+            return;
+        }
+
+        applyMove(m);
+        boardView.refresh();
+
+        if (gameOver) {
+            // Award 50 points for win/loss in command line mode
+            if (authRepository.isLoggedIn()) {
+                String winner = board.whiteToMove ? "Black" : "White"; // Side that just moved
+                if (board.inCheck()) { // Checkmate
+                    if (winner.equals("White")) {
+                        statsRepository.recordWin(50, new StatsRepository.VoidCallback() {
+                            @Override public void onSuccess() {}
+                            @Override public void onError(Exception e) {}
+                        });
+                    } else {
+                        statsRepository.recordLoss(50, new StatsRepository.VoidCallback() {
+                            @Override public void onSuccess() {}
+                            @Override public void onError(Exception e) {}
+                        });
+                    }
+                } else { // Draw
+                    statsRepository.recordDraw(new StatsRepository.VoidCallback() {
+                        @Override public void onSuccess() {}
+                        @Override public void onError(Exception e) {}
+                    });
+                }
+            }
+            return;
+        }
+
+        showCommandLineInputDialog();
+    }
+
+    private Move parseAlgebraicMove(String input) {
+        // Handle castling
+        if (input.equals("0-0") || input.equals("o-o") || input.equals("oo")) {
+            return parseCastling(true);
+        }
+        if (input.equals("0-0-0") || input.equals("o-o-o") || input.equals("ooo")) {
+            return parseCastling(false);
+        }
+
+        // Parse piece moves: [piece][file][rank][x][file][rank][=piece]
+        // Examples: e4, Nf3, exd5, Bxc6, e8=Q, Nbd7, R1e2
+
+        String s = input;
+        String piece = "P"; // Default pawn
+
+        // Check for piece letter at start
+        if (s.length() > 0) {
+            String c = s.substring(0, 1).toUpperCase();
+            if (c.equals("N") || c.equals("B") || c.equals("R") || c.equals("Q") || c.equals("K")) {
+                piece = c;
+            }
+        }
+
+        // Find destination square (last 2 chars before promotion)
+        int promo = 0;
+        int eqIdx = s.indexOf("=");
+        if (eqIdx > -1) {
+            String promoStr = s.substring(eqIdx + 1).toUpperCase();
+            if (promoStr.equals("Q")) promo = 'Q';
+            else if (promoStr.equals("R")) promo = 'R';
+            else if (promoStr.equals("B")) promo = 'B';
+            else if (promoStr.equals("N")) promo = 'N';
+            s = s.substring(0, eqIdx);
+        }
+
+        // Check for capture
+        boolean capture = s.contains("x") || s.contains("X");
+        s = s.replace("x", "").replace("X", "");
+
+        // Now s should be like "e4", "Nf3", "e5", "Nbd7", "R1e2"
+        // Last 2 chars are destination
+        if (s.length() < 2) return null;
+
+        String destStr = s.substring(s.length() - 2);
+        int to = Move.squareIndex(destStr);
+        if (to < 0) return null;
+
+        // Source info is the remaining part
+        String srcInfo = s.substring(0, s.length() - 2);
+
+        // Find matching legal move
+        List<Move> legal = board.legalMoves();
+        for (Move legalMove : legal) {
+            if (legalMove.to != to) continue;
+
+            // Check piece type matches
+            char pieceChar = board.sq[legalMove.from];
+            if (piece.equals("P") && Character.toUpperCase(pieceChar) != 'P') continue;
+            if (piece.equals("N") && Character.toUpperCase(pieceChar) != 'N') continue;
+            if (piece.equals("B") && Character.toUpperCase(pieceChar) != 'B') continue;
+            if (piece.equals("R") && Character.toUpperCase(pieceChar) != 'R') continue;
+            if (piece.equals("Q") && Character.toUpperCase(pieceChar) != 'Q') continue;
+            if (piece.equals("K") && Character.toUpperCase(pieceChar) != 'K') continue;
+
+            // Check promotion
+            if (promo != 0 && legalMove.promotion != promo) continue;
+
+            // Check source file/rank if specified
+            if (!srcInfo.isEmpty()) {
+                if (srcInfo.length() == 1) {
+                    char c = srcInfo.charAt(0);
+                    if (c >= 'a' && c <= 'h') {
+                        if ((legalMove.from & 7) != (c - 'a')) continue;
+                    } else if (c >= '1' && c <= '8') {
+                        if ((legalMove.from >> 3) != (8 - (c - '0'))) continue;
+                    }
+                } else if (srcInfo.length() == 2) {
+                    int from = Move.squareIndex(srcInfo);
+                    if (from != legalMove.from) continue;
+                }
+            }
+
+            // Check capture
+            if (capture && legalMove.captured == 0) continue;
+            if (!capture && legalMove.captured != 0) continue;
+
+            return legalMove;
+        }
+
+        return null;
+    }
+
+    private Move parseCastling(boolean kingSide) {
+        List<Move> legal = board.legalMoves();
+        for (Move m : legal) {
+            char pieceChar = board.sq[m.from];
+            if (Character.toUpperCase(pieceChar) != 'K') continue;
+            if (kingSide && m.castle == Move.CASTLE_KING) return m;
+            if (!kingSide && m.castle == Move.CASTLE_QUEEN) return m;
+        }
+        return null;
     }
 
     /** Player tapped a destination square; resolve which move (if any) that was. */

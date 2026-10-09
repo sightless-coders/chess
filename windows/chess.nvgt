@@ -873,6 +873,11 @@ string show_main_menu() {
 	}
 	m.add_item("Host an online game", "host");
 	m.add_item("Join an online game", "join");
+	if (logged_in_user.empty()) {
+		speak("Please sign in to play command line mode.", true);
+	} else {
+		m.add_item("Command line mode (50 pts)", "cmdline");
+	}
 	m.add_item("How to play", "help");
 	m.add_item(blind_mode ? "Switch to sighted mode" : "Switch to blind mode", "mode");
 	m.add_item("Quit", "quit");
@@ -949,11 +954,231 @@ string show_main_menu() {
 			}
 			continue;
 		}
+		if (id == "cmdline") {
+			if (logged_in_user.empty()) {
+				speak("Please sign in to play command line mode.", true);
+				continue;
+			}
+			play_command_line_mode();
+			continue;
+		}
 	}
 	return "quit";
 }
 
-// ------------------------------------------------------------ game loop -----
+// Command line mode: text-based move input (e.g., "e4", "Nf3", "0-0", "e8=Q")
+void play_command_line_mode() {
+	bool was_online = online_mode;
+	online_mode = false; // Command line is local only
+	vs_computer = false;
+	clock_enabled = false; // No clock in command line mode
+
+	start_match();
+	speak("Command line mode. Enter moves like e4, Nf3, 0-0, e8=Q. Type 'help' for commands, 'quit' to exit.", true);
+	print_board();
+
+	while (!game_over) {
+		wait(5);
+
+		string input = "";
+		if (key_pressed(KEY_RETURN)) {
+			// Read a line from console/input
+			speak("Enter move:", true);
+			input = input_box("Your move", "");
+			if (input.empty()) continue;
+			
+			input = input.lower();
+			// Manual trim
+			while (input.length() > 0 && (input[0] == ' ' || input[0] == '\t' || input[0] == '\n' || input[0] == '\r')) input = input.substr(1);
+			while (input.length() > 0 && (input[input.length() - 1] == ' ' || input[input.length() - 1] == '\t' || input[input.length() - 1] == '\n' || input[input.length() - 1] == '\r')) input = input.substr(0, input.length() - 1);
+			
+			if (input == "quit" || input == "exit" || input == "q") {
+				speak("Exiting command line mode.", true);
+				break;
+			}
+			if (input == "help" || input == "?") {
+				speak("Commands: e4 (move), Nf3 (knight), 0-0 (castle king), 0-0-0 (castle queen), e8=Q (promote), undo, board, quit", true);
+				continue;
+			}
+			if (input == "board" || input == "b") {
+				print_board();
+				continue;
+			}
+			if (input == "undo" || input == "u") {
+				if (history.length() >= 2) {
+					board_unmake(history[history.length() - 1]);
+					history.remove_at(history.length() - 1);
+					board_unmake(history[history.length() - 1]);
+					history.remove_at(history.length() - 1);
+					speak("Move taken back.", true);
+					print_board();
+				} else {
+					speak("Nothing to undo.", true);
+				}
+				continue;
+			}
+
+			// Parse the move
+			move_t@ m = parse_algebraic_move(input);
+			if (@m == null) {
+				s_error.play();
+				speak("Invalid move format. Try again.", true);
+				continue;
+			}
+
+			// Check if move is legal
+			legal_moves(false);
+			bool legal = false;
+			for (uint i = 0; i < gen_pool.length(); i++) {
+				if (gen_pool[i].from == m.from && gen_pool[i].to == m.to && (gen_pool[i].promo == m.promo || m.promo == 0)) {
+					@m = gen_pool[i];
+					legal = true;
+					break;
+				}
+			}
+			if (!legal) {
+				s_error.play();
+				speak("Illegal move.", true);
+				continue;
+			}
+
+			apply_move(m);
+			print_board();
+
+			if (game_over) {
+				// Award 50 points for win/loss in command line mode
+				if (!logged_in_user.empty() && !logged_in_user.starts_with("Guest_")) {
+					if (in_check(white_to_move)) {
+						string winner = white_to_move ? "Black" : "White";
+						if ((white_to_move && online_is_host) || (!white_to_move && !online_is_host)) {
+							auth.record_result(logged_in_user, "loss", 50);
+						} else {
+							auth.record_result(logged_in_user, "win", 50);
+						}
+					} else {
+						auth.record_result(logged_in_user, "draw", 0);
+					}
+				}
+				break;
+			}
+		}
+	}
+
+	online_mode = was_online;
+}
+
+// Parse algebraic notation to move
+move_t@ parse_algebraic_move(const string&in input) {
+	// Handle castling
+	if (input == "0-0" || input == "o-o" || input == "oo") {
+		return parse_castling(true);
+	}
+	if (input == "0-0-0" || input == "o-o-o" || input == "ooo") {
+		return parse_castling(false);
+	}
+
+	// Parse piece moves: [piece][file][rank][x][file][rank][=piece]
+	// Examples: e4, Nf3, exd5, Bxc6, e8=Q, Nbd7, R1e2
+	
+	string s = input;
+	string piece = "P"; // Default pawn
+	int piece_idx = 0;
+	
+	// Check for piece letter at start
+	if (s.length() > 0) {
+		string c = s.substr(0, 1);
+		if (c == "N" || c == "B" || c == "R" || c == "Q" || c == "K") {
+			piece = c;
+			piece_idx = 1;
+		}
+	}
+	
+	// Find destination square (last 2 chars before promotion)
+	int promo = 0;
+	if (s.find("=") > -1) {
+		int eq = s.find("=");
+		string promo_str = s.substr(eq + 1);
+		if (promo_str == "Q" || promo_str == "q") promo = P_QUEEN;
+		else if (promo_str == "R" || promo_str == "r") promo = P_ROOK;
+		else if (promo_str == "B" || promo_str == "b") promo = P_BISHOP;
+		else if (promo_str == "N" || promo_str == "n") promo = P_KNIGHT;
+		s = s.substr(0, eq);
+	}
+	
+	// Check for capture
+	bool capture = s.find("x") > -1 || s.find("X") > -1;
+	if (capture) s = s.replace("x", "").replace("X", "");
+	
+	// Now s should be like "e4", "Nf3", "e5", "Nbd7", "R1e2"
+	// Last 2 chars are destination
+	if (s.length() < 2) return null;
+	
+	string dest_str = s.substr(s.length() - 2);
+	int to = square_index(dest_str);
+	if (to < 0) return null;
+	
+	// Source info is the remaining part
+	string src_info = s.substr(0, s.length() - 2);
+	
+	// Find matching legal move
+	legal_moves(false);
+	for (uint i = 0; i < gen_pool.length(); i++) {
+		move_t@ m = gen_pool[i];
+		if (m.to != to) continue;
+		
+		// Check piece type matches
+		if (piece == "P" && piece_type(m.piece) != P_PAWN) continue;
+		if (piece == "N" && piece_type(m.piece) != P_KNIGHT) continue;
+		if (piece == "B" && piece_type(m.piece) != P_BISHOP) continue;
+		if (piece == "R" && piece_type(m.piece) != P_ROOK) continue;
+		if (piece == "Q" && piece_type(m.piece) != P_QUEEN) continue;
+		if (piece == "K" && piece_type(m.piece) != P_KING) continue;
+		
+		// Check promotion
+		if (promo != 0 && m.promo != promo) continue;
+		
+		// Check source file/rank if specified
+		if (!src_info.empty()) {
+			if (src_info.length() == 1) {
+				// File or rank specified
+				string c = src_info.substr(0, 1);
+				if (c >= "a" && c <= "h") {
+					// File specified
+					int src_file = character_to_ascii(c) - 97; // 'a' = 97
+					if ((m.from & 7) != src_file) continue;
+				} else if (c >= "1" && c <= "8") {
+					// Rank specified
+					int rank = 8 - (character_to_ascii(c) - 48); // '0' = 48
+					if ((m.from >> 3) != rank) continue;
+				}
+			} else if (src_info.length() == 2) {
+				// Both file and rank specified
+				int from = square_index(src_info);
+				if (from != m.from) continue;
+			}
+		}
+		
+		// Check capture
+		if (capture && m.captured == 0) continue;
+		if (!capture && m.captured != 0) continue;
+		
+		return m;
+	}
+	
+	return null;
+}
+
+move_t@ parse_castling(bool king_side) {
+	legal_moves(false);
+	for (uint i = 0; i < gen_pool.length(); i++) {
+		move_t@ m = gen_pool[i];
+		if (piece_type(m.piece) != P_KING) continue;
+		if (king_side && (m.flags & MOVE_CK) != 0) return m;
+		if (!king_side && (m.flags & MOVE_CQ) != 0) return m;
+	}
+	return null;
+}
+
 // Runs one match. Returns true when the application should quit.
 bool game_loop() {
 	print_board();
