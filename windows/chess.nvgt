@@ -38,6 +38,7 @@
 #include "menu.nvgt"
 #include "input_forms.nvgt"
 #include "chess_core.nvgt"
+#include "accounts.nvgt"
 
 #pragma asset "sounds/logo.ogg"
 #pragma asset "sounds/ui/click.wav"
@@ -80,6 +81,10 @@ int selected = -1;
 move_t@[] history;
 string status_text = "";
 string move_log = "";
+
+// Account system.
+AccountManager auth;
+string logged_in_user = "";
 
 // Online state.
 network@ net = null;
@@ -173,6 +178,12 @@ string turn_hint() {
 }
 
 // ------------------------------------------------------------ game flow -----
+void record_game_result(const string&in result) { // "win", "loss", "draw"
+	if (!logged_in_user.empty() && !logged_in_user.starts_with("Guest_")) {
+		auth.record_result(logged_in_user, result);
+	}
+}
+
 void apply_move(move_t@ m, bool from_net = false) {
 	bool mover_white = piece_is_white(m.piece);
 	board_make(m);
@@ -190,18 +201,38 @@ void apply_move(move_t@ m, bool from_net = false) {
 	if (!has_moves) {
 		game_over = true;
 		if (in_check(white_to_move)) {
-			set_status((mover_white ? "Black" : "White") + " is checkmated. "
-					+ (mover_white ? "White" : "Black") + " wins the match. "
+			string winner = mover_white ? "White" : "Black";
+			string loser = mover_white ? "Black" : "White";
+			set_status(loser + " is checkmated. "
+					+ winner + " wins the match. "
 					+ "Press N for a new game or M for the main menu.", false);
+			// Record stats for logged-in user
+			if (!vs_computer && !online_mode) {
+				// Two players local - no stats
+			} else if (vs_computer) {
+				// vs computer: human is White
+				if (winner == "White") record_game_result("win");
+				else record_game_result("loss");
+			} else if (online_mode) {
+				// online: host is White
+				if ((online_is_host && winner == "White") || (!online_is_host && winner == "Black")) {
+					record_game_result("win");
+				} else {
+					record_game_result("loss");
+				}
+			}
 		} else {
 			set_status("Stalemate, a draw. Press N for a new game or M for the main menu.", false);
+			if (vs_computer || online_mode) record_game_result("draw");
 		}
 	} else if (insufficient_material()) {
 		game_over = true;
 		set_status("Draw, insufficient material. Press N for a new game or M for the main menu.", false);
+		if (vs_computer || online_mode) record_game_result("draw");
 	} else if (halfmove_clock >= 100) {
 		game_over = true;
 		set_status("Draw by the 50-move rule. Press N for a new game or M for the main menu.", false);
+		if (vs_computer || online_mode) record_game_result("draw");
 	} else {
 		string side = white_to_move ? "White" : "Black";
 		if (in_check(white_to_move)) set_status("Check, " + side + " to move" + turn_hint() + ".", false);
@@ -319,9 +350,12 @@ void do_resign() {
 		net_send("RESIGN");
 		set_status("You resigned. " + (online_is_host ? "Black" : "White") + " wins the match. "
 				+ "Press M for the main menu.");
+		// Record loss for resigning player
+		record_game_result("loss");
 	} else if (vs_computer) {
 		set_status("You resigned. The computer wins the match. "
 				+ "Press N for a new game or M for the main menu.");
+		record_game_result("loss");
 	} else {
 		string resigner = white_to_move ? "White" : "Black";
 		string winner = white_to_move ? "Black" : "White";
@@ -596,6 +630,11 @@ string show_main_menu() {
 		+ "Press escape twice to quit.";
 	m.add_item("Play against the computer", "cpu");
 	m.add_item("Two players on this keyboard", "local");
+	if (logged_in_user.empty()) {
+		m.add_item("Account", "account");
+	} else {
+		m.add_item("Account: " + logged_in_user, "account");
+	}
 	m.add_item("Host an online game", "host");
 	m.add_item("Join an online game", "join");
 	m.add_item("How to play", "help");
@@ -628,6 +667,21 @@ string show_main_menu() {
 			speak(CONTROLS_HELP, true);
 			continue;
 		}
+		if (id == "account") {
+			if (logged_in_user.empty()) {
+				show_login_menu(auth, logged_in_user);
+				if (!logged_in_user.empty()) {
+					m.set_item_text(2, "Account: " + logged_in_user);
+				}
+			} else {
+				show_account_menu(auth, logged_in_user);
+				if (logged_in_user.empty()) {
+					m.set_item_text(2, "Account");
+				}
+			}
+			m.automatic_intro = true;
+			continue;
+		}
 		if (id == "cpu") {
 			if (prompt_difficulty()) return "play";
 			continue;
@@ -637,6 +691,10 @@ string show_main_menu() {
 			return "play";
 		}
 		if (id == "host") {
+			if (logged_in_user.empty()) {
+				speak("Please sign in to host online games.", true);
+				continue;
+			}
 			if (online_host_flow()) {
 				start_online_match(true);
 				return "play";
@@ -644,6 +702,10 @@ string show_main_menu() {
 			continue;
 		}
 		if (id == "join") {
+			if (logged_in_user.empty()) {
+				speak("Please sign in to join online games.", true);
+				continue;
+			}
 			string addr = ask_address();
 			if (addr != "" && online_join_flow(addr)) {
 				start_online_match(false);

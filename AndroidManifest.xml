@@ -2,14 +2,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.sightlesscoders.chess">
 
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <application
         android:label="Chess"
         android:icon="@drawable/ic_chess"
         android:allowBackup="true"
         android:supportsRtl="true">
         <activity
-            android:name=".MainActivity"
-            android:label="Chess"
+            android:name=".online.LoginActivity"
+            android:label="Chess - Sign In"
             android:exported="true"
             android:screenOrientation="portrait">
             <intent-filter>
@@ -17,6 +20,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".online.RegisterActivity"
+            android:label="Chess - Create Account"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+        <activity
+            android:name=".MainActivity"
+            android:label="Chess"
+            android:exported="false"
+            android:screenOrientation="portrait" />
     </application>
 
 </manifest>

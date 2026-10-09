@@ -8,10 +8,15 @@ import java.util.concurrent.Executors;
 import org.sightlesscoders.chess.core.Board;
 import org.sightlesscoders.chess.core.ChessAI;
 import org.sightlesscoders.chess.core.Move;
+import org.sightlesscoders.chess.online.AuthRepository;
+import org.sightlesscoders.chess.online.LoginActivity;
+import org.sightlesscoders.chess.online.StatsRepository;
+import org.sightlesscoders.chess.online.UserStats;
 
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.res.AssetFileDescriptor;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -48,6 +53,7 @@ public class MainActivity extends Activity {
     private static final int MODE_EASY = 1;
     private static final int MODE_NORMAL = 2;
     private static final int MODE_HARD = 3;
+    private static final int MODE_ONLINE = 4;
 
     // The computer plays black.
     private static final boolean AI_IS_BLACK = true;
@@ -69,6 +75,11 @@ public class MainActivity extends Activity {
     private boolean blindMode = false;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private int promptRetries = 0;
+
+    // Online
+    private AuthRepository authRepository;
+    private StatsRepository statsRepository;
+    private boolean vsOnline = false;
 
     // Startup prompt overlay.
     private FrameLayout frame;
@@ -101,6 +112,9 @@ public class MainActivity extends Activity {
         AccessibilityManager am =
                 (AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
         talkBack = am != null && am.isTouchExplorationEnabled();
+
+        authRepository = new AuthRepository(this);
+        statsRepository = new StatsRepository(authRepository);
 
         board = new Board();
         buildUi();
@@ -162,6 +176,20 @@ public class MainActivity extends Activity {
                 boardView.flip();
             }
         }));
+        buttons.addView(makeButton("Stats", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showStatsDialog();
+            }
+        }));
+        if (authRepository != null && authRepository.isLoggedIn()) {
+            buttons.addView(makeButton("Sign out", new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    signOut();
+                }
+            }));
+        }
         root.addView(buttons, wrapParams());
 
         boardView = new BoardView(this, board);
@@ -507,7 +535,8 @@ public class MainActivity extends Activity {
 
     private void newGame(int mode) {
         if (aiThinking) return; // the engine is busy; don't yank the board away
-        vsComputer = mode != MODE_TWO_PLAYERS;
+        vsComputer = mode != MODE_TWO_PLAYERS && mode != MODE_ONLINE;
+        vsOnline = mode == MODE_ONLINE;
         switch (mode) {
             case MODE_EASY:   aiDepth = 1; aiTimeMs = 500;  break;
             case MODE_HARD:   aiDepth = 4; aiTimeMs = 3000; break;
@@ -524,6 +553,9 @@ public class MainActivity extends Activity {
 
         if (vsComputer) {
             setStatus("New game — you play White against the computer. Your move.");
+        } else if (vsOnline) {
+            // Online game started via matchmaking
+            setStatus("Online game — waiting for opponent...");
         } else {
             setStatus("New game — two players. White to move.");
         }
@@ -538,20 +570,25 @@ public class MainActivity extends Activity {
                 "Computer — Easy",
                 "Computer — Normal",
                 "Computer — Hard",
-                "Two players",
+                "Two players (local)",
+                "Online matchmaking",
         };
-        final int[] modes = { MODE_EASY, MODE_NORMAL, MODE_HARD, MODE_TWO_PLAYERS };
+        final int[] modes = { MODE_EASY, MODE_NORMAL, MODE_HARD, MODE_TWO_PLAYERS, MODE_ONLINE };
         new AlertDialog.Builder(this)
                 .setTitle("New game")
                 .setItems(choices, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        newGame(modes[which]);
+                        if (modes[which] == MODE_ONLINE) {
+                            startOnlineMatchmaking();
+                        } else {
+                            newGame(modes[which]);
+                        }
                     }
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
-        feedback("New game. Choose opponent: computer easy, normal, hard, or two players.");
+        feedback("New game. Choose opponent: computer easy, normal, hard, two players, or online.");
     }
 
     /** Player tapped a destination square; resolve which move (if any) that was. */
@@ -668,6 +705,10 @@ public class MainActivity extends Activity {
             setStatus("The computer is still thinking — try again in a moment.");
             return;
         }
+        if (vsOnline) {
+            setStatus("Undo not available in online games.");
+            return;
+        }
         if (history.isEmpty()) {
             setStatus("Nothing to undo.");
             return;
@@ -689,5 +730,91 @@ public class MainActivity extends Activity {
                 && (!vsComputer || board.whiteToMove != AI_IS_BLACK));
         String side = board.whiteToMove ? "White" : "Black";
         setStatus("Move taken back. " + side + " to move.");
+    }
+
+    private void startOnlineMatchmaking() {
+        if (!authRepository.isLoggedIn()) {
+            setStatus("Please sign in to play online.");
+            return;
+        }
+        setStatus("Finding opponent...");
+
+        org.sightlesscoders.chess.online.MatchmakingRepository matchmaking =
+                new org.sightlesscoders.chess.online.MatchmakingRepository(authRepository);
+        matchmaking.findMatch(new org.sightlesscoders.chess.online.MatchmakingRepository.MatchCallback() {
+            @Override
+            public void onMatched(String gameId, boolean isWhite) {
+                runOnUiThread(() -> {
+                    vsOnline = true;
+                    vsComputer = false;
+                    board.reset();
+                    history.clear();
+                    lastMove = null;
+                    gameOver = false;
+                    boardView.setLastMove(null);
+                    boardView.clearSelection();
+                    boardView.refresh();
+                    boardView.setInputEnabled(modeChosen && isWhite);
+                    String status = isWhite
+                            ? "Online game — you are White. Your move."
+                            : "Online game — you are Black. Waiting for opponent.";
+                    setStatus(status);
+                    // TODO: Listen for opponent moves via Firebase
+                });
+            }
+
+            @Override
+            public void onError(Exception e) {
+                runOnUiThread(() -> setStatus("Matchmaking failed: " + e.getMessage()));
+            }
+        });
+    }
+
+    private void showStatsDialog() {
+        if (!authRepository.isLoggedIn()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Statistics")
+                    .setMessage("Sign in to view your statistics.")
+                    .setPositiveButton("Sign In", (d, w) -> startActivity(new Intent(this, LoginActivity.class)))
+                    .setNegativeButton("Cancel", null)
+                    .show();
+            return;
+        }
+
+        statsRepository.getStats(new StatsRepository.StatsCallback() {
+            @Override
+            public void onSuccess(UserStats stats) {
+                runOnUiThread(() -> {
+                    String msg = String.format(
+                            "Wins: %d\nLosses: %d\nDraws: %d\nTotal: %d\nWin Rate: %.1f%%",
+                            stats.wins, stats.losses, stats.draws, stats.totalGames, stats.getWinRate()
+                    );
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Your Statistics")
+                            .setMessage(msg)
+                            .setPositiveButton("OK", null)
+                            .show();
+                });
+            }
+
+            @Override
+            public void onError(Exception e) {
+                runOnUiThread(() ->
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("Error")
+                                .setMessage("Failed to load stats: " + e.getMessage())
+                                .setPositiveButton("OK", null)
+                                .show()
+                );
+            }
+        });
+    }
+
+    private void signOut() {
+        authRepository.signOut();
+        Intent intent = new Intent(this, LoginActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(intent);
+        finish();
     }
 }

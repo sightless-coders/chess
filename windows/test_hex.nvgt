@@ -1,0 +1,15 @@
+string to_hex(uint value) {
+	const string hex_chars = "0123456789abcdef";
+	string result = "";
+	for (int i = 7; i >= 0; i--) {
+		uint nibble = (value >> (i * 4)) & 0xF;
+		result += hex_chars[nibble];
+	}
+	return result;
+}
+
+void main() {
+	uint hash = 123456789;
+	string hex = to_hex(hash);
+	print("hex: " + hex);
+}
