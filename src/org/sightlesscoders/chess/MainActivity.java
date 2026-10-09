@@ -91,6 +91,11 @@ public class MainActivity extends Activity {
     private long lastMoveTimeMs = 0;
     private boolean clockRunning = false;
 
+    // Draw offer system
+    private boolean drawOffered = false;
+    private boolean drawOfferedByWhite = false;
+    private boolean drawOfferPending = false;
+
     // Startup prompt overlay.
     private FrameLayout frame;
     private LinearLayout overlay;
@@ -190,6 +195,12 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 showStatsDialog();
+            }
+        }));
+        buttons.addView(makeButton("Draw", new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                handleDrawOffer();
             }
         }));
         if (authRepository != null && authRepository.isLoggedIn()) {
@@ -564,6 +575,10 @@ public class MainActivity extends Activity {
         boardView.clearSelection();
         boardView.refresh();
         boardView.setInputEnabled(modeChosen);
+        // Reset draw offer
+        drawOffered = false;
+        drawOfferedByWhite = false;
+        drawOfferPending = false;
         // Reset clock
         whiteTimeMs = clockBaseMs;
         blackTimeMs = clockBaseMs;
@@ -1204,6 +1219,42 @@ public class MainActivity extends Activity {
         finish();
     }
 
+    private void handleDrawOffer() {
+        if (vsComputer) {
+            setStatus("Draw offers only available in multiplayer games.");
+            return;
+        }
+        if (gameOver) {
+            setStatus("Game is already over.");
+            return;
+        }
+        if (drawOfferPending) {
+            // Accept draw offer
+            gameOver = true;
+            drawOfferPending = false;
+            drawOffered = false;
+            setStatus("Draw accepted. The game is a draw. Tap New game to play again.");
+            if (authRepository.isLoggedIn()) {
+                statsRepository.recordDraw(new StatsRepository.VoidCallback() {
+                    @Override public void onSuccess() {}
+                    @Override public void onError(Exception e) {}
+                });
+            }
+            boardView.refresh();
+        } else if (drawOffered) {
+            // Cancel own draw offer
+            drawOffered = false;
+            drawOfferedByWhite = false;
+            setStatus("Draw offer cancelled.");
+        } else {
+            // Offer draw
+            drawOffered = true;
+            drawOfferedByWhite = board.whiteToMove;
+            drawOfferPending = true;
+            setStatus("You offer a draw. Waiting for opponent...");
+        }
+    }
+
     @Override
     public boolean onKeyDown(int keyCode, android.view.KeyEvent event) {
         // T key: check your time, Shift+T: check opponent's time
@@ -1219,6 +1270,26 @@ public class MainActivity extends Activity {
                 long yourTime = board.whiteToMove ? whiteTimeMs : blackTimeMs;
                 String yourName = board.whiteToMove ? "White" : "Black";
                 feedback("Your time (" + yourName + "): " + formatTime(yourTime));
+            }
+            return true;
+        }
+        // D key: offer/accept draw, Shift+D: reject draw offer
+        if (keyCode == android.view.KeyEvent.KEYCODE_D) {
+            boolean shiftPressed = (event.getMetaState() & android.view.KeyEvent.META_SHIFT_ON) != 0;
+            if (shiftPressed) {
+                // Reject draw offer
+                if (drawOfferPending && !vsComputer && !gameOver) {
+                    drawOfferPending = false;
+                    drawOffered = false;
+                    setStatus("Draw offer rejected.");
+                } else {
+                    setStatus("No draw offer to reject.");
+                }
+            } else {
+                // Offer or accept draw
+                if (!vsComputer && !gameOver) {
+                    handleDrawOffer();
+                }
             }
             return true;
         }

@@ -102,6 +102,11 @@ double black_time_ms = 0; // Black's remaining time
 double last_move_time = 0; // Timestamp of last move for time calculation
 bool clock_running = false; // Whether clock is currently ticking
 
+// Draw offer system.
+bool draw_offered = false; // Whether a draw has been offered
+bool draw_offered_by_white = false; // Who offered the draw
+bool draw_offer_pending = false; // Whether draw offer is waiting for response
+
 // ------------------------------------------------------------- speech ------
 void set_status(string t, bool interrupt = true) {
 	status_text = t;
@@ -432,6 +437,10 @@ void start_match() {
 	game_over = false;
 	selected = -1;
 	cursor = 52;
+	// Reset draw offer
+	draw_offered = false;
+	draw_offered_by_white = false;
+	draw_offer_pending = false;
 	// Reset clock
 	white_time_ms = clock_base_ms;
 	black_time_ms = clock_base_ms;
@@ -480,13 +489,32 @@ void net_send_clock_settings() {
 }
 
 bool prompt_difficulty() {
-	speak("Computer difficulty. Press 1 for easy, 2 for normal, 3 for hard. Escape cancels.", true);
+	menu m;
+	m.focus_first_item = true;
+	m.sounds_prefix = "sounds/";
+	m.click_sound = "ui/click.wav";
+	m.select_sound = "ui/move.wav";
+	m.edge_sound = "ui/error.wav";
+	m.intro_text = "Computer difficulty. Use up/down arrows to choose, Enter to select, Escape to cancel.";
+	m.add_item("Easy", "1");
+	m.add_item("Normal", "2");
+	m.add_item("Hard", "3");
+	m.add_item("Cancel", "cancel");
+
 	while (true) {
 		wait(5);
-		if (key_pressed(KEY_1)) { new_game(1); return true; }
-		if (key_pressed(KEY_2)) { new_game(2); return true; }
-		if (key_pressed(KEY_3)) { new_game(3); return true; }
-		if (key_pressed(KEY_ESCAPE)) { speak("Canceled.", true); return false; }
+		if (m.monitor()) continue;
+		if (m.selected_item < 0) {
+			speak("Canceled.", true);
+			return false;
+		}
+		string id = m.get_selected_item_id();
+		if (id == "cancel") {
+			speak("Canceled.", true);
+			return false;
+		}
+		new_game(parse_int(id));
+		return true;
 	}
 	return false;
 }
@@ -496,14 +524,33 @@ bool prompt_new_game() {
 		speak("You are in an online game. Press M for the main menu to leave it.", true);
 		return false;
 	}
-	speak("New game. Press 1 for easy computer, 2 for normal, 3 for hard, 4 for two players. Escape cancels.", true);
+	menu m;
+	m.focus_first_item = true;
+	m.sounds_prefix = "sounds/";
+	m.click_sound = "ui/click.wav";
+	m.select_sound = "ui/move.wav";
+	m.edge_sound = "ui/error.wav";
+	m.intro_text = "New game. Use up/down arrows to choose, Enter to select, Escape to cancel.";
+	m.add_item("Computer — Easy", "1");
+	m.add_item("Computer — Normal", "2");
+	m.add_item("Computer — Hard", "3");
+	m.add_item("Two players (local)", "4");
+	m.add_item("Cancel", "cancel");
+
 	while (true) {
 		wait(5);
-		if (key_pressed(KEY_1)) { new_game(1); return true; }
-		if (key_pressed(KEY_2)) { new_game(2); return true; }
-		if (key_pressed(KEY_3)) { new_game(3); return true; }
-		if (key_pressed(KEY_4)) { new_game(4); return true; }
-		if (key_pressed(KEY_ESCAPE)) { speak("Canceled.", true); return false; }
+		if (m.monitor()) continue;
+		if (m.selected_item < 0) {
+			speak("Canceled.", true);
+			return false;
+		}
+		string id = m.get_selected_item_id();
+		if (id == "cancel") {
+			speak("Canceled.", true);
+			return false;
+		}
+		new_game(parse_int(id));
+		return true;
 	}
 	return false;
 }
@@ -636,6 +683,22 @@ string net_clock_sync_msg() {
 	return "CLOCK|" + int(white_time_ms) + "|" + int(black_time_ms) + "|" + (white_to_move ? "1" : "0");
 }
 
+string net_draw_offer_msg() {
+	return "DRAW_OFFER|" + (white_to_move ? "1" : "0");
+}
+
+string net_draw_accept_msg() {
+	return "DRAW_ACCEPT";
+}
+
+string net_draw_reject_msg() {
+	return "DRAW_REJECT";
+}
+
+string net_draw_cancel_msg() {
+	return "DRAW_CANCEL";
+}
+
 void online_shutdown() {
 	if (@net != null) net.destroy();
 	@net = null;
@@ -716,6 +779,39 @@ void handle_net_message(string msg) {
 		selected = -1;
 		set_status("Your opponent resigned. You win the match. Press M for the main menu.", true);
 		print_board();
+	} else if (msg.substr(0, 9) == "DRAW_OFFER") {
+		// DRAW_OFFER|white_to_move
+		if (game_over) return;
+		if (draw_offer_pending) return; // Already have a pending offer
+		string[]@ p = msg.split("|");
+		if (p.length() >= 2) {
+			draw_offered_by_white = (p[1] == "1");
+			draw_offered = true;
+			draw_offer_pending = true;
+			string offerer = draw_offered_by_white ? "White" : "Black";
+			speak(offerer + " offers a draw. Press D to accept, Shift+D to reject.", true);
+		}
+	} else if (msg == "DRAW_ACCEPT") {
+		if (!draw_offer_pending) return;
+		game_over = true;
+		draw_offer_pending = false;
+		draw_offered = false;
+		set_status("Draw accepted. The game is a draw. Press M for the main menu.", true);
+		if (!logged_in_user.empty() && !logged_in_user.starts_with("Guest_")) {
+			auth.record_result(logged_in_user, "draw", 0);
+		}
+		print_board();
+	} else if (msg == "DRAW_REJECT") {
+		if (!draw_offer_pending) return;
+		draw_offer_pending = false;
+		draw_offered = false;
+		string rejecter = white_to_move ? "White" : "Black";
+		speak(rejecter + " rejects the draw offer.", true);
+	} else if (msg == "DRAW_CANCEL") {
+		if (!draw_offer_pending) return;
+		draw_offer_pending = false;
+		draw_offered = false;
+		speak("Draw offer cancelled.", true);
 	}
 }
 
@@ -1264,6 +1360,47 @@ bool game_loop() {
 		}
 		if (key_pressed(KEY_M)) to_menu = true;
 		if (key_pressed(KEY_C)) handle_chat();
+
+		// D key: offer draw / accept draw offer, Shift+D: reject draw offer
+		if (key_pressed(KEY_D)) {
+			if (online_mode || !vs_computer) {
+				bool shift = shift_held();
+				if (shift) {
+					// Reject draw offer
+					if (draw_offer_pending) {
+						draw_offer_pending = false;
+						draw_offered = false;
+						if (online_mode) net_send(net_draw_reject_msg());
+						speak("Draw offer rejected.", true);
+					} else {
+						speak("No draw offer to reject.", true);
+					}
+				} else {
+					// Offer or accept draw
+					if (draw_offer_pending) {
+						// Accept draw offer
+						game_over = true;
+						draw_offer_pending = false;
+						draw_offered = false;
+						if (online_mode) net_send(net_draw_accept_msg());
+						set_status("Draw accepted. The game is a draw. Press M for the main menu.", true);
+						if (!logged_in_user.empty() && !logged_in_user.starts_with("Guest_")) {
+							auth.record_result(logged_in_user, "draw", 0);
+						}
+						print_board();
+					} else if (!game_over) {
+						// Offer draw
+						draw_offered = true;
+						draw_offered_by_white = white_to_move;
+						draw_offer_pending = true;
+						if (online_mode) net_send(net_draw_offer_msg());
+						speak("You offer a draw. Waiting for opponent...", true);
+					}
+				}
+			} else {
+				speak("Draw offers only available in multiplayer games.", true);
+			}
+		}
 
 		// T key: check your time, Shift+T: check opponent's time
 		if (key_pressed(KEY_T)) {
