@@ -83,6 +83,7 @@ class AccountManager {
 		account.set("wins", 0);
 		account.set("losses", 0);
 		account.set("draws", 0);
+		account.set("points", 1200); // Starting Elo-like rating
 
 		json_object@ accounts = load_accounts();
 		accounts.set(username, account);
@@ -154,16 +155,42 @@ class AccountManager {
 		draws = int(double(account["draws"]));
 	}
 
-	// Record game result
-	void record_result(const string&in username, const string&in result) { // "win", "loss", "draw"
+	// Record game result with points update
+	void record_result(const string&in username, const string&in result, int points_change = 0) { // "win", "loss", "draw"
 		json_object@ accounts = load_accounts();
 		if (!accounts.exists(username)) return;
 
 		json_object@ account = json_object(accounts[username]);
-		if (result == "win") account.set("wins", int(double(account["wins"])) + 1);
-		else if (result == "loss") account.set("losses", int(double(account["losses"])) + 1);
-		else if (result == "draw") account.set("draws", int(double(account["draws"])) + 1);
+		if (result == "win") {
+			account.set("wins", int(double(account["wins"])) + 1);
+			account.set("points", int(double(account["points"])) + (points_change > 0 ? points_change : 25));
+		} else if (result == "loss") {
+			account.set("losses", int(double(account["losses"])) + 1);
+			account.set("points", int(double(account["points"])) - (points_change > 0 ? points_change : 25));
+		} else if (result == "draw") {
+			account.set("draws", int(double(account["draws"])) + 1);
+			// Small points change for draws
+			account.set("points", int(double(account["points"])) + (points_change != 0 ? points_change : 0));
+		}
 
+		accounts.set(username, account);
+		save_accounts(accounts);
+	}
+
+	// Get user points
+	int get_points(const string&in username) {
+		json_object@ accounts = load_accounts();
+		if (!accounts.exists(username)) return 1200;
+		json_object@ account = json_object(accounts[username]);
+		return int(double(account["points"]));
+	}
+
+	// Set user points (for manual adjustments)
+	void set_points(const string&in username, int points) {
+		json_object@ accounts = load_accounts();
+		if (!accounts.exists(username)) return;
+		json_object@ account = json_object(accounts[username]);
+		account.set("points", points);
 		accounts.set(username, account);
 		save_accounts(accounts);
 	}
@@ -179,7 +206,8 @@ class AccountManager {
 		int whole = rate_int / 10;
 		int decimal = rate_int % 10;
 		string rate_str = "" + whole + "." + decimal;
-		return username + ": " + wins + "W-" + losses + "L-" + draws + "D (" + rate_str + "% win rate)";
+		int points = get_points(username);
+		return username + ": " + wins + "W-" + losses + "L-" + draws + "D (" + rate_str + "% win rate) | Points: " + points;
 	}
 
 	// Private helpers

@@ -93,6 +93,15 @@ bool online_mode = false;
 bool online_is_host = true;
 string[] pending_net; // messages received while the connection was still opening
 
+// Clock / time control.
+bool clock_enabled = false;
+int clock_base_ms = 0; // Base time in milliseconds (e.g., 300000 for 5 min)
+int clock_increment_ms = 0; // Increment per move in milliseconds
+double white_time_ms = 0; // White's remaining time
+double black_time_ms = 0; // Black's remaining time
+double last_move_time = 0; // Timestamp of last move for time calculation
+bool clock_running = false; // Whether clock is currently ticking
+
 // ------------------------------------------------------------- speech ------
 void set_status(string t, bool interrupt = true) {
 	status_text = t;
@@ -178,14 +187,35 @@ string turn_hint() {
 }
 
 // ------------------------------------------------------------ game flow -----
-void record_game_result(const string&in result) { // "win", "loss", "draw"
+void record_game_result(const string&in result, int points_change = 0) { // "win", "loss", "draw"
 	if (!logged_in_user.empty() && !logged_in_user.starts_with("Guest_")) {
-		auth.record_result(logged_in_user, result);
+		auth.record_result(logged_in_user, result, points_change);
 	}
 }
 
 void apply_move(move_t@ m, bool from_net = false) {
 	bool mover_white = piece_is_white(m.piece);
+	double now = timer().elapsed * 1000; // Current time in ms
+
+	// Handle clock: subtract time from player who just moved, add increment
+	if (clock_enabled && clock_running && last_move_time > 0) {
+		double elapsed = now - last_move_time;
+		if (mover_white) {
+			white_time_ms -= elapsed;
+			if (white_time_ms < 0) white_time_ms = 0;
+			white_time_ms += clock_increment_ms;
+		} else {
+			black_time_ms -= elapsed;
+			if (black_time_ms < 0) black_time_ms = 0;
+			black_time_ms += clock_increment_ms;
+		}
+		// Check for flag fall
+		if ((mover_white && white_time_ms <= 0) || (!mover_white && black_time_ms <= 0)) {
+			handle_flag_fall(mover_white);
+			return;
+		}
+	}
+
 	board_make(m);
 	history.insert_last(m);
 	selected = -1;
@@ -196,10 +226,17 @@ void apply_move(move_t@ m, bool from_net = false) {
 	print("[move] " + played);
 	if (mode_chosen) speak(played, true);
 
+	// Start clock for next player
+	if (clock_enabled) {
+		last_move_time = now;
+		clock_running = true;
+	}
+
 	legal_moves(false);
 	bool has_moves = gen_pool.length() > 0;
 	if (!has_moves) {
 		game_over = true;
+		clock_running = false;
 		if (in_check(white_to_move)) {
 			string winner = mover_white ? "White" : "Black";
 			string loser = mover_white ? "Black" : "White";
@@ -214,11 +251,11 @@ void apply_move(move_t@ m, bool from_net = false) {
 				if (winner == "White") record_game_result("win");
 				else record_game_result("loss");
 			} else if (online_mode) {
-				// online: host is White
+				// online: host is White - use points system
 				if ((online_is_host && winner == "White") || (!online_is_host && winner == "Black")) {
-					record_game_result("win");
+					record_game_result("win", 25); // Winner gains points
 				} else {
-					record_game_result("loss");
+					record_game_result("loss", 25); // Loser loses points
 				}
 			}
 		} else {
@@ -227,10 +264,12 @@ void apply_move(move_t@ m, bool from_net = false) {
 		}
 	} else if (insufficient_material()) {
 		game_over = true;
+		clock_running = false;
 		set_status("Draw, insufficient material. Press N for a new game or M for the main menu.", false);
 		if (vs_computer || online_mode) record_game_result("draw");
 	} else if (halfmove_clock >= 100) {
 		game_over = true;
+		clock_running = false;
 		set_status("Draw by the 50-move rule. Press N for a new game or M for the main menu.", false);
 		if (vs_computer || online_mode) record_game_result("draw");
 	} else {
@@ -239,6 +278,27 @@ void apply_move(move_t@ m, bool from_net = false) {
 		else set_status(side + " to move" + turn_hint() + ".", false);
 	}
 	if (online_mode && !from_net) net_send(net_move_msg(m));
+	print_board();
+}
+
+// Handle flag fall (time runs out)
+void handle_flag_fall(bool flagged_player_white) {
+	game_over = true;
+	clock_running = false;
+	string flagged = flagged_player_white ? "White" : "Black";
+	string winner = flagged_player_white ? "Black" : "White";
+	set_status(flagged + " flag falls. " + winner + " wins on time. "
+			+ "Press N for a new game or M for the main menu.", false);
+	if (online_mode) {
+		if ((online_is_host && winner == "White") || (!online_is_host && winner == "Black")) {
+			record_game_result("win", 25);
+		} else {
+			record_game_result("loss", 25);
+		}
+	} else if (vs_computer) {
+		if (winner == "White") record_game_result("win");
+		else record_game_result("loss");
+	}
 	print_board();
 }
 
@@ -372,6 +432,11 @@ void start_match() {
 	game_over = false;
 	selected = -1;
 	cursor = 52;
+	// Reset clock
+	white_time_ms = clock_base_ms;
+	black_time_ms = clock_base_ms;
+	last_move_time = 0;
+	clock_running = clock_enabled;
 }
 
 void new_game(int mode) {
@@ -396,9 +461,22 @@ void start_online_match(bool host) {
 	vs_computer = false;
 	online_mode = true;
 	online_is_host = host;
+
+	// Prompt for clock settings
+	if (host) {
+		prompt_clock_settings();
+	}
+
 	if (host) set_status("Match started. You play White. Your move.", true);
 	else set_status("Match started. You play Black. White to move. Waiting for your opponent.", true);
 	print_board();
+}
+
+// Send clock settings to opponent
+void net_send_clock_settings() {
+	if (!clock_enabled) return;
+	string msg = "CLOCKSET|" + clock_base_ms + "|" + clock_increment_ms;
+	net_send(msg);
 }
 
 bool prompt_difficulty() {
@@ -430,13 +508,132 @@ bool prompt_new_game() {
 	return false;
 }
 
+// Prompt for clock settings (time control)
+void prompt_clock_settings() {
+	menu m;
+	m.focus_first_item = true;
+	m.sounds_prefix = "sounds/";
+	m.click_sound = "ui/click.wav";
+	m.select_sound = "ui/move.wav";
+	m.edge_sound = "ui/error.wav";
+	m.intro_text = "Time control. Choose a time control or press escape for no clock.";
+	m.add_item("No clock", "none");
+	m.add_item("Bullet: 1 min", "bullet");
+	m.add_item("Blitz: 3 min", "blitz3");
+	m.add_item("Blitz: 5 min", "blitz5");
+	m.add_item("Rapid: 10 min", "rapid10");
+	m.add_item("Rapid: 15 min + 10s inc", "rapid15inc");
+	m.add_item("Custom", "custom");
+	m.add_item("Back", "back");
+
+	while (true) {
+		wait(5);
+		if (m.monitor()) continue;
+		if (m.selected_item < 0) {
+			// Escape = no clock
+			clock_enabled = false;
+			return;
+		}
+
+		string id = m.get_selected_item_id();
+		if (id == "back") {
+			prompt_clock_settings(); // Restart
+			return;
+		}
+
+		if (id == "none") {
+			clock_enabled = false;
+			speak("No clock.", true);
+			return;
+		} else if (id == "bullet") {
+			clock_enabled = true;
+			clock_base_ms = 60000; // 1 minute
+			clock_increment_ms = 0;
+		} else if (id == "blitz3") {
+			clock_enabled = true;
+			clock_base_ms = 180000; // 3 minutes
+			clock_increment_ms = 0;
+		} else if (id == "blitz5") {
+			clock_enabled = true;
+			clock_base_ms = 300000; // 5 minutes
+			clock_increment_ms = 0;
+		} else if (id == "rapid10") {
+			clock_enabled = true;
+			clock_base_ms = 600000; // 10 minutes
+			clock_increment_ms = 0;
+		} else if (id == "rapid15inc") {
+			clock_enabled = true;
+			clock_base_ms = 900000; // 15 minutes
+			clock_increment_ms = 10000; // 10 seconds
+		} else if (id == "custom") {
+			// Custom time control via input form
+			input_form f("Custom Time Control");
+			f.add_number_field("base_min", "Base minutes", 5, true);
+			f.add_number_field("inc_sec", "Increment seconds", 0, false);
+			dictionary@ d = f.run();
+			if (@d != null && !f.user_canceled) {
+				int base_min;
+				int inc_sec;
+				d.get("base_min", base_min);
+				d.get("inc_sec", inc_sec);
+				if (base_min > 0) {
+					clock_enabled = true;
+					clock_base_ms = base_min * 60000;
+					clock_increment_ms = inc_sec * 1000;
+					speak("Custom time control set: " + base_min + " minutes" + (inc_sec > 0 ? " with " + inc_sec + " second increment" : ""), true);
+				} else {
+					clock_enabled = false;
+					speak("No clock.", true);
+				}
+			} else {
+				prompt_clock_settings(); // Restart
+				return;
+			}
+		}
+
+		if (clock_enabled) {
+			white_time_ms = clock_base_ms;
+			black_time_ms = clock_base_ms;
+			speak("Time control set. White: " + format_time(clock_base_ms) + (clock_increment_ms > 0 ? " + " + (clock_increment_ms / 1000) + "s increment" : ""), true);
+		}
+		return;
+	}
+}
+
+// Format milliseconds as MM:SS or HH:MM:SS
+string format_time(double ms) {
+	if (ms < 0) ms = 0;
+	int total_seconds = int(ms / 1000);
+	int hours = total_seconds / 3600;
+	int minutes = (total_seconds % 3600) / 60;
+	int seconds = total_seconds % 60;
+	string result = "";
+	if (hours > 0) {
+		result = string(hours) + ":";
+		if (minutes < 10) result = result + "0";
+		result = result + string(minutes) + ":";
+		if (seconds < 10) result = result + "0";
+		result = result + string(seconds);
+	} else {
+		result = string(minutes) + ":";
+		if (seconds < 10) result = result + "0";
+		result = result + string(seconds);
+	}
+	return result;
+}
+
 // -------------------------------------------------------------- online ------
 void net_send(string msg) {
 	if (@net != null && net_peer != 0) net.send_reliable(net_peer, msg, NET_CH);
 }
 
 string net_move_msg(move_t@ m) {
-	return "MOVE|" + m.from + "|" + m.to + "|" + m.promo;
+	// Include clock times: MOVE|from|to|promo|white_time|black_time
+	return "MOVE|" + m.from + "|" + m.to + "|" + m.promo + "|" + int(white_time_ms) + "|" + int(black_time_ms);
+}
+
+string net_clock_sync_msg() {
+	return "CLOCK|" + int(white_time_ms) + "|" + int(black_time_ms) + "|" + (white_to_move ? "1" : "0");
 }
 
 void online_shutdown() {
@@ -449,7 +646,7 @@ void online_shutdown() {
 }
 
 // Applies a move that arrived over the network.
-void net_apply_move(int from, int to, int promo) {
+void net_apply_move(int from, int to, int promo, int recv_white_time, int recv_black_time) {
 	legal_moves(false);
 	move_t@ m = null;
 	for (uint i = 0; i < gen_pool.length(); i++) {
@@ -466,6 +663,11 @@ void net_apply_move(int from, int to, int promo) {
 		speak("The opponent's move does not fit this position.", true);
 		return;
 	}
+	// Sync clock times from opponent
+	if (clock_enabled) {
+		white_time_ms = recv_white_time;
+		black_time_ms = recv_black_time;
+	}
 	apply_move(m, true);
 }
 
@@ -473,7 +675,39 @@ void handle_net_message(string msg) {
 	if (msg.substr(0, 5) == "MOVE|") {
 		string[]@ p = msg.split("|");
 		if (p.length() < 4) return;
-		net_apply_move(parse_int(p[1]), parse_int(p[2]), parse_int(p[3]));
+		int from = parse_int(p[1]);
+		int to = parse_int(p[2]);
+		int promo = parse_int(p[3]);
+		int recv_white_time = 0;
+		int recv_black_time = 0;
+		if (p.length() >= 6) {
+			recv_white_time = parse_int(p[4]);
+			recv_black_time = parse_int(p[5]);
+		}
+		net_apply_move(from, to, promo, recv_white_time, recv_black_time);
+	} else if (msg.substr(0, 6) == "CLOCK|") {
+		// Clock sync message: CLOCK|white_time|black_time|white_to_move
+		string[]@ p = msg.split("|");
+		if (p.length() >= 4) {
+			if (clock_enabled) {
+				white_time_ms = parse_int(p[1]);
+				black_time_ms = parse_int(p[2]);
+				// Note: white_to_move is p[3], but we trust local state
+			}
+		}
+	} else if (msg.substr(0, 9) == "CLOCKSET|") {
+		// Clock settings from host: CLOCKSET|base_ms|increment_ms
+		string[]@ p = msg.split("|");
+		if (p.length() >= 3) {
+			clock_enabled = true;
+			clock_base_ms = parse_int(p[1]);
+			clock_increment_ms = parse_int(p[2]);
+			white_time_ms = clock_base_ms;
+			black_time_ms = clock_base_ms;
+			clock_running = true;
+			last_move_time = timer().elapsed * 1000;
+			speak("Clock settings received: " + format_time(clock_base_ms) + (clock_increment_ms > 0 ? " + " + (clock_increment_ms / 1000) + "s increment" : ""), true);
+		}
 	} else if (msg.substr(0, 4) == "MSG|") {
 		speak("Your opponent says: " + msg.substr(4), true);
 	} else if (msg == "RESIGN") {
@@ -533,6 +767,8 @@ bool online_host_flow() {
 		if (ev.type == event_connect) {
 			net_peer = ev.peer_id;
 			net_send("WELCOME|black");
+			// Send clock settings to joiner
+			net_send_clock_settings();
 			print("[online] opponent connected");
 			return true;
 		}
@@ -735,6 +971,28 @@ bool game_loop() {
 			break;
 		}
 
+		// Clock countdown for the player whose turn it is
+		if (clock_enabled && clock_running && !game_over && last_move_time > 0) {
+			double now = timer().elapsed * 1000;
+			double elapsed = now - last_move_time;
+			if (white_to_move) {
+				white_time_ms -= elapsed;
+				if (white_time_ms <= 0) {
+					white_time_ms = 0;
+					handle_flag_fall(true);
+					continue;
+				}
+			} else {
+				black_time_ms -= elapsed;
+				if (black_time_ms <= 0) {
+					black_time_ms = 0;
+					handle_flag_fall(false);
+					continue;
+				}
+			}
+			last_move_time = now;
+		}
+
 		// Cursor movement: arrows go one square, Shift/Ctrl with left or
 		// right arrow walk the diagonals.
 		int old_cursor = cursor;
@@ -781,6 +1039,27 @@ bool game_loop() {
 		}
 		if (key_pressed(KEY_M)) to_menu = true;
 		if (key_pressed(KEY_C)) handle_chat();
+
+		// T key: check your time, Shift+T: check opponent's time
+		if (key_pressed(KEY_T)) {
+			if (clock_enabled) {
+				bool shift = shift_held();
+				if (shift) {
+					// Opponent's time
+					double opp_time = white_to_move ? black_time_ms : white_time_ms;
+					string opp_name = white_to_move ? "Black" : "White";
+					speak(opp_name + " time: " + format_time(opp_time), true);
+				} else {
+					// Your time
+					double your_time = white_to_move ? white_time_ms : black_time_ms;
+					string your_name = white_to_move ? "White" : "Black";
+					speak("Your time (" + your_name + "): " + format_time(your_time), true);
+				}
+			} else {
+				speak("Clock is not enabled.", true);
+			}
+		}
+
 		if (key_pressed(KEY_R)) {
 			if (resign_armed && resign_t.elapsed < 1500) {
 				resign_armed = false;
