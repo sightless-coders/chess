@@ -1,0 +1,704 @@
+// chess_core.nvgt - Chess rules engine and AI for the Windows (NVGT) version.
+// Port of the Android game's Java core (Board/Move/ChessAI), which is verified
+// against known perft counts in chess_selftest.nvgt.
+//
+// Piece codes: 0 = empty. Bits 0-2 hold the type
+// (1 king, 2 queen, 3 rook, 4 bishop, 5 knight, 6 pawn), bit 3 set = white.
+
+const int P_KING = 1;
+const int P_QUEEN = 2;
+const int P_ROOK = 3;
+const int P_BISHOP = 4;
+const int P_KNIGHT = 5;
+const int P_PAWN = 6;
+const int C_WHITE = 8;
+
+const int CK_WK = 1;
+const int CK_WQ = 2;
+const int CK_BK = 4;
+const int CK_BQ = 8;
+
+const int MOVE_EP = 1;   // en passant capture
+const int MOVE_DBL = 2;  // double pawn push
+const int MOVE_CK = 4;   // castle king side
+const int MOVE_CQ = 8;   // castle queen side
+
+const int INF = 10000000;
+const int MATE = 100000;
+const int MAX_QPLY = 5;
+
+class move_t {
+	int from;
+	int to;
+	int piece;
+	int captured;
+	int promo;
+	int flags;
+	int rook_from;
+	int rook_to;
+	int prev_castle;
+	int prev_ep;
+	int prev_half;
+	int score;
+	move_t() {
+		from = 0; to = 0; piece = 0; captured = 0; promo = 0; flags = 0;
+		rook_from = -1; rook_to = -1; prev_castle = 0; prev_ep = -1; prev_half = 0; score = 0;
+	}
+	move_t(int f, int t, int pc, int cap, int pr, int fl, int rf, int rt, int pcast, int pep, int phalf) {
+		from = f; to = t; piece = pc; captured = cap; promo = pr; flags = fl;
+		rook_from = rf; rook_to = rt; prev_castle = pcast; prev_ep = pep; prev_half = phalf;
+		score = 0;
+	}
+}
+
+// ---------------------------------------------------------------- state ----
+int[] sq;
+bool white_to_move = true;
+int castling_rights = CK_WK | CK_WQ | CK_BK | CK_BQ;
+int ep_target = -1;
+int halfmove_clock = 0;
+move_t@[] gen_pool; // refilled by legal_moves(); snapshot before recursing
+
+bool tables_ready = false;
+int[] PST_PAWN;
+int[] PST_KNIGHT;
+int[] PST_BISHOP;
+int[] PST_ROOK;
+int[] PST_QUEEN;
+int[] PST_KING;
+
+// AI state.
+timer ai_clock;
+bool ai_aborted = false;
+int ai_nodes = 0;
+double ai_limit = 1500;
+
+bool piece_is_white(int p) { return p >= C_WHITE; }
+int piece_type(int p) { return p & 7; }
+
+string square_name(int idx) {
+	if (idx < 0 || idx > 63) return "-";
+	string files = "abcdefgh";
+	string ranks = "87654321";
+	return files.substr(idx % 8, 1) + ranks.substr(idx / 8, 1);
+}
+
+string piece_words(int p) {
+	string color = piece_is_white(p) ? "white" : "black";
+	int t = piece_type(p);
+	if (t == P_KING) return color + " king";
+	if (t == P_QUEEN) return color + " queen";
+	if (t == P_ROOK) return color + " rook";
+	if (t == P_BISHOP) return color + " bishop";
+	if (t == P_KNIGHT) return color + " knight";
+	return color + " pawn";
+}
+
+string piece_char(int p) {
+	if (p == 0) return ".";
+	int t = piece_type(p);
+	bool white = piece_is_white(p);
+	if (t == P_KING) return white ? "K" : "k";
+	if (t == P_QUEEN) return white ? "Q" : "q";
+	if (t == P_ROOK) return white ? "R" : "r";
+	if (t == P_BISHOP) return white ? "B" : "b";
+	if (t == P_KNIGHT) return white ? "N" : "n";
+	return white ? "P" : "p";
+}
+
+string move_notation(move_t@ m) {
+	if ((m.flags & MOVE_CK) != 0) return "castles king side";
+	if ((m.flags & MOVE_CQ) != 0) return "castles queen side";
+	string s = square_name(m.from) + ((m.captured != 0) ? " takes " : " to ") + square_name(m.to);
+	if ((m.flags & MOVE_EP) != 0) s += " en passant";
+	if (m.promo == P_QUEEN) s += ", promotes to queen";
+	else if (m.promo == P_ROOK) s += ", promotes to rook";
+	else if (m.promo == P_BISHOP) s += ", promotes to bishop";
+	else if (m.promo == P_KNIGHT) s += ", promotes to knight";
+	return s;
+}
+
+void board_reset() {
+	sq.resize(64);
+	for (int i = 0; i < 64; i++) sq[i] = 0;
+	int[] back = { P_ROOK, P_KNIGHT, P_BISHOP, P_QUEEN, P_KING, P_BISHOP, P_KNIGHT, P_ROOK };
+	for (int c = 0; c < 8; c++) {
+		sq[c] = back[c];
+		sq[8 + c] = P_PAWN;
+		sq[48 + c] = P_PAWN + C_WHITE;
+		sq[56 + c] = back[c] + C_WHITE;
+	}
+	white_to_move = true;
+	castling_rights = CK_WK | CK_WQ | CK_BK | CK_BQ;
+	ep_target = -1;
+	halfmove_clock = 0;
+	gen_pool.resize(0);
+}
+
+// ------------------------------------------------------------- attacking ---
+bool is_attacked(int idx, bool by_white) {
+	int r = idx / 8;
+	int c = idx % 8;
+
+	// Pawns: an attacker sits one rank "behind" the attacked square.
+	int pr = r + (by_white ? 1 : -1);
+	if (pr >= 0 && pr < 8) {
+		int pawn = by_white ? P_PAWN + C_WHITE : P_PAWN;
+		if (c > 0 && sq[pr * 8 + c - 1] == pawn) return true;
+		if (c < 7 && sq[pr * 8 + c + 1] == pawn) return true;
+	}
+
+	// Knights: every (|dr|,|dc|) = (1,2) offset.
+	int knight = by_white ? P_KNIGHT + C_WHITE : P_KNIGHT;
+	for (int dr = -2; dr <= 2; dr++) {
+		for (int dc = -2; dc <= 2; dc++) {
+			if (abs(dr) + abs(dc) != 3) continue;
+			int rr = r + dr;
+			int cc = c + dc;
+			if (rr >= 0 && rr < 8 && cc >= 0 && cc < 8 && sq[rr * 8 + cc] == knight) return true;
+		}
+	}
+
+	// Kings.
+	int king = by_white ? P_KING + C_WHITE : P_KING;
+	for (int dr = -1; dr <= 1; dr++) {
+		for (int dc = -1; dc <= 1; dc++) {
+			if (dr == 0 && dc == 0) continue;
+			int rr = r + dr;
+			int cc = c + dc;
+			if (rr >= 0 && rr < 8 && cc >= 0 && cc < 8 && sq[rr * 8 + cc] == king) return true;
+		}
+	}
+
+	// Rooks and queens (orthogonal rays).
+	int rook = by_white ? P_ROOK + C_WHITE : P_ROOK;
+	int queen = by_white ? P_QUEEN + C_WHITE : P_QUEEN;
+	for (int k = 0; k < 4; k++) {
+		int dr = (k < 2) ? (k == 0 ? -1 : 1) : 0;
+		int dc = (k < 2) ? 0 : (k == 2 ? -1 : 1);
+		int rr = r + dr;
+		int cc = c + dc;
+		while (rr >= 0 && rr < 8 && cc >= 0 && cc < 8) {
+			int p = sq[rr * 8 + cc];
+			if (p != 0) {
+				if (p == rook || p == queen) return true;
+				break;
+			}
+			rr += dr;
+			cc += dc;
+		}
+	}
+
+	// Bishops and queens (diagonal rays).
+	int bishop = by_white ? P_BISHOP + C_WHITE : P_BISHOP;
+	for (int k = 0; k < 4; k++) {
+		int dr = (k < 2) ? -1 : 1;
+		int dc = (k % 2 == 0) ? -1 : 1;
+		int rr = r + dr;
+		int cc = c + dc;
+		while (rr >= 0 && rr < 8 && cc >= 0 && cc < 8) {
+			int p = sq[rr * 8 + cc];
+			if (p != 0) {
+				if (p == bishop || p == queen) return true;
+				break;
+			}
+			rr += dr;
+			cc += dc;
+		}
+	}
+	return false;
+}
+
+bool in_check(bool white) {
+	int k = white ? P_KING + C_WHITE : P_KING;
+	for (int i = 0; i < 64; i++) {
+		if (sq[i] == k) return is_attacked(i, !white);
+	}
+	return false;
+}
+
+// ------------------------------------------------------------- generation --
+void gen_add(int from, int to, int piece, int captured, int promo, int flags, int rook_from, int rook_to) {
+	gen_pool.insert_last(move_t(from, to, piece, captured, promo, flags, rook_from, rook_to,
+			castling_rights, ep_target, halfmove_clock));
+}
+
+void gen_pawn_move(int from, int to, int piece, int captured, int flags) {
+	int r = to / 8;
+	if (r == 0 || r == 7) {
+		gen_add(from, to, piece, captured, P_QUEEN, flags, -1, -1);
+		gen_add(from, to, piece, captured, P_ROOK, flags, -1, -1);
+		gen_add(from, to, piece, captured, P_BISHOP, flags, -1, -1);
+		gen_add(from, to, piece, captured, P_KNIGHT, flags, -1, -1);
+	} else {
+		gen_add(from, to, piece, captured, 0, flags, -1, -1);
+	}
+}
+
+void gen_pawn(int i, bool white) {
+	int r = i / 8;
+	int c = i % 8;
+	int dir = white ? -1 : 1;
+	int start_row = white ? 6 : 1;
+	int nr = r + dir;
+	if (nr < 0 || nr > 7) return;
+	int piece = white ? P_PAWN + C_WHITE : P_PAWN;
+
+	// Single (and double) advance.
+	int one = nr * 8 + c;
+	if (sq[one] == 0) {
+		gen_pawn_move(i, one, piece, 0, 0);
+		if (r == start_row) {
+			int two = (r + 2 * dir) * 8 + c;
+			if (sq[two] == 0) gen_add(i, two, piece, 0, 0, MOVE_DBL, -1, -1);
+		}
+	}
+
+	// Captures, including en passant.
+	for (int dc = -1; dc <= 1; dc += 2) {
+		int nc = c + dc;
+		if (nc < 0 || nc > 7) continue;
+		int t = nr * 8 + nc;
+		int victim = sq[t];
+		if (victim != 0) {
+			if (piece_is_white(victim) != white) gen_pawn_move(i, t, piece, victim, 0);
+		} else if (ep_target >= 0 && t == ep_target) {
+			int vic_idx = t + (white ? 8 : -8);
+			int vic = sq[vic_idx];
+			if (piece_type(vic) == P_PAWN && piece_is_white(vic) != white) {
+				gen_add(i, t, piece, vic, 0, MOVE_EP, -1, -1);
+			}
+		}
+	}
+}
+
+void gen_step(int i, bool white, int kind) {
+	// kind: 5 = knight, 6 = king (walks one square, castling handled elsewhere)
+	int piece = sq[i];
+	int r = i / 8;
+	int c = i % 8;
+	int span = (kind == P_KNIGHT) ? 2 : 1;
+	for (int dr = -2; dr <= 2; dr++) {
+		for (int dc = -2; dc <= 2; dc++) {
+			if (dr == 0 && dc == 0) continue;
+			if (kind == P_KNIGHT) {
+				if (abs(dr) + abs(dc) != 3) continue;
+			} else {
+				if (abs(dr) > 1 || abs(dc) > 1) continue;
+			}
+			int rr = r + dr;
+			int cc = c + dc;
+			if (rr < 0 || rr > 7 || cc < 0 || cc > 7) continue;
+			int t = rr * 8 + cc;
+			int victim = sq[t];
+			if (victim == 0) {
+				gen_add(i, t, piece, 0, 0, 0, -1, -1);
+			} else if (piece_is_white(victim) != white) {
+				gen_add(i, t, piece, victim, 0, 0, -1, -1);
+			}
+		}
+	}
+}
+
+void gen_sliding(int i, bool white, bool orthogonal, bool diagonal) {
+	int piece = sq[i];
+	int r = i / 8;
+	int c = i % 8;
+	for (int k = 0; k < 4; k++) {
+		int dr;
+		int dc;
+		if (orthogonal) {
+			dr = (k < 2) ? (k == 0 ? -1 : 1) : 0;
+			dc = (k < 2) ? 0 : (k == 2 ? -1 : 1);
+		} else {
+			dr = (k < 2) ? -1 : 1;
+			dc = (k % 2 == 0) ? -1 : 1;
+		}
+		int rr = r + dr;
+		int cc = c + dc;
+		while (rr >= 0 && rr < 8 && cc >= 0 && cc < 8) {
+			int t = rr * 8 + cc;
+			int victim = sq[t];
+			if (victim == 0) {
+				gen_add(i, t, piece, 0, 0, 0, -1, -1);
+			} else {
+				if (piece_is_white(victim) != white) gen_add(i, t, piece, victim, 0, 0, -1, -1);
+				break;
+			}
+			rr += dr;
+			cc += dc;
+		}
+	}
+}
+
+void gen_king(int i, bool white) {
+	gen_step(i, white, P_KING);
+	int piece = white ? P_KING + C_WHITE : P_KING;
+	if (white && i == 60) {
+		if ((castling_rights & CK_WK) != 0 && sq[61] == 0 && sq[62] == 0 && sq[63] == P_ROOK + C_WHITE
+				&& !in_check(true) && !is_attacked(61, false) && !is_attacked(62, false)) {
+			gen_add(60, 62, piece, 0, 0, MOVE_CK, 63, 61);
+		}
+		if ((castling_rights & CK_WQ) != 0 && sq[59] == 0 && sq[58] == 0 && sq[57] == 0 && sq[56] == P_ROOK + C_WHITE
+				&& !in_check(true) && !is_attacked(59, false) && !is_attacked(58, false)) {
+			gen_add(60, 58, piece, 0, 0, MOVE_CQ, 56, 59);
+		}
+	} else if (!white && i == 4) {
+		if ((castling_rights & CK_BK) != 0 && sq[5] == 0 && sq[6] == 0 && sq[7] == P_ROOK
+				&& !in_check(false) && !is_attacked(5, true) && !is_attacked(6, true)) {
+			gen_add(4, 6, piece, 0, 0, MOVE_CK, 7, 5);
+		}
+		if ((castling_rights & CK_BQ) != 0 && sq[3] == 0 && sq[2] == 0 && sq[1] == 0 && sq[0] == P_ROOK
+				&& !in_check(false) && !is_attacked(3, true) && !is_attacked(2, true)) {
+			gen_add(4, 2, piece, 0, 0, MOVE_CQ, 0, 3);
+		}
+	}
+}
+
+int base_value(int p) {
+	int t = piece_type(p);
+	if (t == P_PAWN) return 100;
+	if (t == P_KNIGHT) return 320;
+	if (t == P_BISHOP) return 330;
+	if (t == P_ROOK) return 500;
+	if (t == P_QUEEN) return 900;
+	return 0;
+}
+
+int move_order_score(move_t@ m) {
+	int s = 0;
+	if (m.captured != 0) s += 1000 + 10 * base_value(m.captured) - base_value(m.piece);
+	if (m.promo != 0) s += 800 + base_value(m.promo + (piece_is_white(m.piece) ? C_WHITE : 0));
+	if ((m.flags & (MOVE_CK | MOVE_CQ)) != 0) s += 50;
+	return s;
+}
+
+void order_pool() {
+	// Selection sort, highest score first.
+	uint n = gen_pool.length();
+	for (uint i = 0; i < n; i++) {
+		gen_pool[i].score = move_order_score(gen_pool[i]);
+	}
+	for (uint i = 0; i < n; i++) {
+		uint best = i;
+		for (uint j = i + 1; j < n; j++) {
+			if (gen_pool[j].score > gen_pool[best].score) best = j;
+		}
+		if (best != i) {
+			move_t@ tmp = gen_pool[i];
+			@gen_pool[i] = @gen_pool[best];
+			@gen_pool[best] = @tmp;
+		}
+	}
+}
+
+// Fills gen_pool with pseudo-legal moves for the side to move.
+void gen_pseudo(bool captures_only) {
+	for (int i = 0; i < 64; i++) {
+		int p = sq[i];
+		if (p == 0) continue;
+		bool white = piece_is_white(p);
+		if (white != white_to_move) continue;
+		int t = piece_type(p);
+		if (t == P_PAWN) gen_pawn(i, white);
+		else if (t == P_KNIGHT) gen_step(i, white, P_KNIGHT);
+		else if (t == P_BISHOP) gen_sliding(i, white, false, true);
+		else if (t == P_ROOK) gen_sliding(i, white, true, false);
+		else if (t == P_QUEEN) {
+			gen_sliding(i, white, true, false);
+			gen_sliding(i, white, false, true);
+		} else gen_king(i, white);
+	}
+	if (captures_only) {
+		move_t@[] caps;
+		for (uint i = 0; i < gen_pool.length(); i++) {
+			if (gen_pool[i].captured != 0) caps.insert_last(gen_pool[i]);
+		}
+		gen_pool.resize(0);
+		for (uint i = 0; i < caps.length(); i++) gen_pool.insert_last(caps[i]);
+	}
+}
+
+// Fills gen_pool with fully legal moves (ordered for the search).
+void legal_moves(bool captures_only) {
+	gen_pool.resize(0);
+	gen_pseudo(captures_only);
+	move_t@[] legal;
+	bool mover = white_to_move;
+	for (uint i = 0; i < gen_pool.length(); i++) {
+		move_t@ m = gen_pool[i];
+		board_make(m);
+		if (!in_check(mover)) legal.insert_last(m);
+		board_unmake(m);
+	}
+	gen_pool.resize(0);
+	for (uint i = 0; i < legal.length(); i++) gen_pool.insert_last(legal[i]);
+	order_pool();
+}
+
+// ----------------------------------------------------------- make/unmake ---
+void board_make(move_t@ m) {
+	bool white = piece_is_white(m.piece);
+	int placed = m.piece;
+	if (m.promo != 0) {
+		placed = m.promo;
+		if (white) placed += C_WHITE;
+	}
+	sq[m.to] = placed;
+	sq[m.from] = 0;
+	if ((m.flags & MOVE_EP) != 0) sq[m.to + (white ? 8 : -8)] = 0;
+	if ((m.flags & (MOVE_CK | MOVE_CQ)) != 0) {
+		sq[m.rook_to] = sq[m.rook_from];
+		sq[m.rook_from] = 0;
+	}
+	if (piece_type(m.piece) == P_PAWN || m.captured != 0) halfmove_clock = 0;
+	else halfmove_clock++;
+	ep_target = ((m.flags & MOVE_DBL) != 0) ? (m.from + (white ? -8 : 8)) : -1;
+	if (m.piece == P_KING + C_WHITE) castling_rights &= ~(CK_WK | CK_WQ);
+	else if (m.piece == P_KING) castling_rights &= ~(CK_BK | CK_BQ);
+	if (m.from == 63 || m.to == 63) castling_rights &= ~CK_WK;
+	if (m.from == 56 || m.to == 56) castling_rights &= ~CK_WQ;
+	if (m.from == 7 || m.to == 7) castling_rights &= ~CK_BK;
+	if (m.from == 0 || m.to == 0) castling_rights &= ~CK_BQ;
+	white_to_move = !white_to_move;
+}
+
+void board_unmake(move_t@ m) {
+	white_to_move = !white_to_move;
+	bool white = piece_is_white(m.piece);
+	sq[m.from] = m.piece;
+	sq[m.to] = 0;
+	if (m.captured != 0) {
+		if ((m.flags & MOVE_EP) != 0) sq[m.to + (white ? 8 : -8)] = m.captured;
+		else sq[m.to] = m.captured;
+	}
+	if ((m.flags & (MOVE_CK | MOVE_CQ)) != 0) {
+		sq[m.rook_from] = sq[m.rook_to];
+		sq[m.rook_to] = 0;
+	}
+	castling_rights = m.prev_castle;
+	ep_target = m.prev_ep;
+	halfmove_clock = m.prev_half;
+}
+
+// --------------------------------------------------------------- perft ----
+int perft(int depth) {
+	if (depth <= 0) return 1;
+	legal_moves(false);
+	move_t@[] list;
+	for (uint i = 0; i < gen_pool.length(); i++) list.insert_last(gen_pool[i]);
+	if (depth == 1) return int(list.length());
+	int nodes = 0;
+	for (uint i = 0; i < list.length(); i++) {
+		board_make(list[i]);
+		nodes += perft(depth - 1);
+		board_unmake(list[i]);
+	}
+	return nodes;
+}
+
+// ---------------------------------------------------------------- eval -----
+void core_init() {
+	if (tables_ready) return;
+	PST_PAWN = {
+		0, 0, 0, 0, 0, 0, 0, 0,
+		50, 50, 50, 50, 50, 50, 50, 50,
+		10, 10, 20, 30, 30, 20, 10, 10,
+		5, 5, 10, 25, 25, 10, 5, 5,
+		0, 0, 0, 20, 20, 0, 0, 0,
+		5, -5, -10, 0, 0, -10, -5, 5,
+		5, 10, 10, -20, -20, 10, 10, 5,
+		0, 0, 0, 0, 0, 0, 0, 0
+	};
+	PST_KNIGHT = {
+		-50, -40, -30, -30, -30, -30, -40, -50,
+		-40, -20, 0, 0, 0, 0, -20, -40,
+		-30, 0, 10, 15, 15, 10, 0, -30,
+		-30, 5, 15, 20, 20, 15, 5, -30,
+		-30, 0, 15, 20, 20, 15, 0, -30,
+		-30, 5, 10, 15, 15, 10, 5, -30,
+		-40, -20, 0, 5, 5, 0, -20, -40,
+		-50, -40, -30, -30, -30, -30, -40, -50
+	};
+	PST_BISHOP = {
+		-20, -10, -10, -10, -10, -10, -10, -20,
+		-10, 0, 0, 0, 0, 0, 0, -10,
+		-10, 0, 5, 10, 10, 5, 0, -10,
+		-10, 5, 5, 10, 10, 5, 5, -10,
+		-10, 0, 10, 10, 10, 10, 0, -10,
+		-10, 10, 10, 10, 10, 10, 10, -10,
+		-10, 5, 0, 0, 0, 0, 5, -10,
+		-20, -10, -10, -10, -10, -10, -10, -20
+	};
+	PST_ROOK = {
+		0, 0, 0, 0, 0, 0, 0, 0,
+		5, 10, 10, 10, 10, 10, 10, 5,
+		-5, 0, 0, 0, 0, 0, 0, -5,
+		-5, 0, 0, 0, 0, 0, 0, -5,
+		-5, 0, 0, 0, 0, 0, 0, -5,
+		-5, 0, 0, 0, 0, 0, 0, -5,
+		-5, 0, 0, 0, 0, 0, 0, -5,
+		0, 0, 0, 5, 5, 0, 0, 0
+	};
+	PST_QUEEN = {
+		-20, -10, -10, -5, -5, -10, -10, -20,
+		-10, 0, 0, 0, 0, 0, 0, -10,
+		-10, 0, 5, 5, 5, 5, 0, -10,
+		-5, 0, 5, 5, 5, 5, 0, -5,
+		0, 0, 5, 5, 5, 5, 0, -5,
+		-10, 5, 5, 5, 5, 5, 0, -10,
+		-10, 0, 5, 0, 0, 0, 0, -10,
+		-20, -10, -10, -5, -5, -10, -10, -20
+	};
+	PST_KING = {
+		-30, -40, -40, -50, -50, -40, -40, -30,
+		-30, -40, -40, -50, -50, -40, -40, -30,
+		-30, -40, -40, -50, -50, -40, -40, -30,
+		-30, -40, -40, -50, -50, -40, -40, -30,
+		-20, -30, -30, -40, -40, -30, -30, -20,
+		-10, -20, -20, -20, -20, -20, -20, -10,
+		20, 20, 0, 0, 0, 0, 20, 20,
+		20, 30, 10, 0, 0, 10, 30, 20
+	};
+	tables_ready = true;
+}
+
+int evaluate() {
+	core_init();
+	int score = 0;
+	int white_bishops = 0;
+	int black_bishops = 0;
+	for (int i = 0; i < 64; i++) {
+		int p = sq[i];
+		if (p == 0) continue;
+		bool white = piece_is_white(p);
+		int t = piece_type(p);
+		int idx = white ? i : (i ^ 56);
+		int v = 0;
+		if (t == P_PAWN) v = 100 + PST_PAWN[idx];
+		else if (t == P_KNIGHT) v = 320 + PST_KNIGHT[idx];
+		else if (t == P_BISHOP) v = 330 + PST_BISHOP[idx];
+		else if (t == P_ROOK) v = 500 + PST_ROOK[idx];
+		else if (t == P_QUEEN) v = 900 + PST_QUEEN[idx];
+		else v = PST_KING[idx];
+		if (white) score += v;
+		else score -= v;
+		if (t == P_BISHOP) {
+			if (white) white_bishops++;
+			else black_bishops++;
+		}
+	}
+	if (white_bishops >= 2) score += 30;
+	if (black_bishops >= 2) score -= 30;
+	return score;
+}
+
+// --------------------------------------------------------------- search ----
+bool ai_time_up() {
+	if (ai_aborted) return true;
+	if (ai_nodes++ % 1024 == 0 && ai_clock.elapsed > ai_limit) {
+		ai_aborted = true;
+	}
+	return ai_aborted;
+}
+
+int quiescence(int alpha, int beta, int ply, int qply) {
+	if (ai_time_up()) return 0;
+	int side_score = white_to_move ? evaluate() : -evaluate();
+	if (side_score >= beta) return beta;
+	if (side_score > alpha) alpha = side_score;
+	if (qply >= MAX_QPLY) return alpha;
+	legal_moves(true);
+	move_t@[] caps;
+	for (uint i = 0; i < gen_pool.length(); i++) caps.insert_last(gen_pool[i]);
+	for (uint i = 0; i < caps.length(); i++) {
+		move_t@ m = caps[i];
+		board_make(m);
+		int score = -quiescence(-beta, -alpha, ply + 1, qply + 1);
+		board_unmake(m);
+		if (ai_aborted) return 0;
+		if (score >= beta) return beta;
+		if (score > alpha) alpha = score;
+	}
+	return alpha;
+}
+
+int alpha_beta(int depth, int alpha, int beta, int ply) {
+	if (ai_time_up()) return 0;
+	if (halfmove_clock >= 100) return 0;
+	if (depth <= 0) return quiescence(alpha, beta, ply, 0);
+	legal_moves(false);
+	move_t@[] moves;
+	for (uint i = 0; i < gen_pool.length(); i++) moves.insert_last(gen_pool[i]);
+	if (moves.length() == 0) {
+		return in_check(white_to_move) ? -(MATE - ply) : 0;
+	}
+	int best = -INF;
+	for (uint i = 0; i < moves.length(); i++) {
+		move_t@ m = moves[i];
+		board_make(m);
+		int score = -alpha_beta(depth - 1, -beta, -alpha, ply + 1);
+		board_unmake(m);
+		if (ai_aborted) return 0;
+		if (score > best) best = score;
+		if (best > alpha) alpha = best;
+		if (alpha >= beta) break;
+	}
+	return best;
+}
+
+// Returns the engine's chosen move (or null when there is no legal move).
+move_t@ ai_find_move(int max_depth, double limit_ms) {
+	core_init();
+	ai_aborted = false;
+	ai_nodes = 0;
+	ai_limit = limit_ms;
+	ai_clock.restart();
+	legal_moves(false);
+	move_t@[] root;
+	for (uint i = 0; i < gen_pool.length(); i++) root.insert_last(gen_pool[i]);
+	if (root.length() == 0) return null;
+	move_t@ best = root[0];
+	for (int depth = 1; depth <= max_depth; depth++) {
+		move_t@ iteration_best = null;
+		uint best_idx = 0;
+		int alpha = -INF;
+		for (uint i = 0; i < root.length(); i++) {
+			move_t@ m = root[i];
+			board_make(m);
+			int score = -alpha_beta(depth - 1, -INF, -alpha, 1);
+			board_unmake(m);
+			if (ai_aborted) break;
+			if (@iteration_best == null || score > alpha) {
+				alpha = score;
+				@iteration_best = m;
+				best_idx = i;
+			}
+		}
+		if (ai_aborted) break;
+		if (@iteration_best != null) {
+			@best = iteration_best;
+			// Try the winner first on the next iteration.
+			if (best_idx > 0) {
+				move_t@ tmp = root[0];
+				@root[0] = @root[best_idx];
+				@root[best_idx] = @tmp;
+			}
+		}
+		if (ai_clock.elapsed > ai_limit) break;
+	}
+	return best;
+}
+
+// True when only the kings (plus at most one minor) remain.
+bool insufficient_material() {
+	int minors = 0;
+	for (int i = 0; i < 64; i++) {
+		int p = sq[i];
+		if (p == 0 || piece_type(p) == P_KING) continue;
+		int t = piece_type(p);
+		if (t == P_BISHOP || t == P_KNIGHT) minors++;
+		else return false;
+	}
+	return minors <= 1;
+}

@@ -1,0 +1,20 @@
+#include "speech.nvgt"
+void logline(string s) {
+	file f;
+	if (f.open("winprobe.txt", "a")) {
+		f.write(s + "\n");
+		f.close();
+	}
+}
+int main() {
+	game_window@ gw = show_window("Chess Probe 2");
+	logline("HANDLE_NULL=" + (@gw == null ? "yes" : "no"));
+	wait(300);
+	logline("OS_HANDLE=" + get_window_os_handle());
+	logline("WIDTH=" + get_window_width() + " HEIGHT=" + get_window_height());
+	logline("HIDDEN=" + (is_window_hidden() ? "yes" : "no"));
+	print("PROBE_ALIVE");
+	wait(10000);
+	print("DONE");
+	return 0;
+}

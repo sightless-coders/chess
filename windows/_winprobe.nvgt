@@ -1,0 +1,9 @@
+#include "speech.nvgt"
+int main() {
+	print("BEFORE_SHOW_WINDOW");
+	show_window("Chess Probe");
+	print("AFTER_SHOW_WINDOW");
+	wait(1500);
+	print("DONE");
+	return 0;
+}

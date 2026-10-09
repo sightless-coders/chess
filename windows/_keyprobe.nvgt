@@ -1,0 +1,18 @@
+#include "speech.nvgt"
+int main() {
+	show_window("Key Probe");
+	print("READY");
+	timer t;
+	t.restart();
+	while (t.elapsed < 25000) {
+		wait(5);
+		if (key_pressed(KEY_SPACE)) print("SEEN_SPACE");
+		if (key_pressed(KEY_RETURN)) print("SEEN_RETURN");
+		if (key_pressed(KEY_UP)) print("SEEN_UP");
+		if (key_pressed(KEY_DOWN)) print("SEEN_DOWN");
+		if (key_pressed(KEY_LEFT)) print("SEEN_LEFT");
+		if (key_pressed(KEY_ESCAPE)) { print("SEEN_ESCAPE"); return 0; }
+	}
+	print("TIMED_OUT");
+	return 0;
+}

@@ -1,0 +1,847 @@
+// chess.nvgt - Chess for Windows, built with NVGT.
+// Playable by blind and sighted players, in the style of Street Fire Arena:
+// the game speaks with NVGT's own built-in TTS voice (use_sr = false).
+//
+// Start-up: the Blind Command audio logo plays and a voice asks:
+//   "Are you blind or not?"
+//   blind   -> press Enter twice
+//   sighted -> press the Up arrow three times
+// The logo can be skipped at any time with the Tab key pressed twice, with
+// Space, or with Enter (which also counts toward the blind answer).
+// After the question the main menu opens.
+//
+// Main menu:
+//   Play against the computer / Two players on this keyboard /
+//   Host an online game / Join an online game / How to play /
+//   Switch voice mode / Quit
+//
+// In-game controls (cursor moves over the board):
+//   Arrows            one square up, down, left or right
+//   Shift+Left/Right  diagonally up-left / up-right
+//   Ctrl+Left/Right   diagonally down-left / down-right
+//   Enter             pick up a piece / play the move
+//   1-4               promotion choice
+//   N                 new game (choose difficulty by voice)
+//   U                 undo (takes back the computer's reply too)
+//   L                 hear every move played so far
+//   M                 back to the main menu
+//   C                 chat message (online games)
+//   R                 resign (press twice)
+//   Escape            press twice to quit
+//
+// Every move is spoken by the game's own voice as "White plays e4",
+// "Black plays e5", "White plays bishop c5" ... and every match announces
+// itself when it starts. Blind mode also narrates the square under the
+// cursor; sighted mode prints the board to the console after every change.
+
+#include "speech.nvgt"
+#include "menu.nvgt"
+#include "input_forms.nvgt"
+#include "chess_core.nvgt"
+
+#pragma asset "sounds/logo.ogg"
+#pragma asset "sounds/ui/click.wav"
+#pragma asset "sounds/ui/move.wav"
+#pragma asset "sounds/ui/error.wav"
+
+const string PROMPT = "Welcome to Chess. Are you blind or not? "
+	+ "If you are blind, press enter twice. "
+	+ "If you are not blind, press the up arrow three times.";
+
+const string CONTROLS_HELP = "How to play. The arrow keys move the cursor over the board: "
+	+ "up, down, left and right go one square. "
+	+ "Hold shift with the left or right arrow to move diagonally up-left or up-right. "
+	+ "Hold control with the left or right arrow to move diagonally down-left or down-right. "
+	+ "Press enter to pick up your piece, move to a highlighted square, then press enter again to play it. "
+	+ "Press 1 to 4 when a pawn reaches the last rank to choose the promoting piece. "
+	+ "Press n for a new game, u to take back your move, l to hear the moves played so far, "
+	+ "m to return to the main menu, r twice to resign, and escape twice to quit. "
+	+ "Online: one player hosts a game and the other joins with the host's address. "
+	+ "Press c to chat during an online game. "
+	+ "Moves are spoken as: White plays e4, Black plays e5, White plays bishop c5.";
+
+const int CHESS_PORT = 47772; // online play: host listens here, joiners connect here
+const uint8 NET_CH = 0;
+
+sound s_logo;
+sound s_click;
+sound s_move;
+sound s_error;
+
+bool mode_chosen = false;
+bool blind_mode = true;
+bool logo_playing = false;
+bool vs_computer = true;
+int ai_depth = 3;
+double ai_ms = 3000;
+bool game_over = false;
+int cursor = 52; // e2 - the human plays White
+int selected = -1;
+move_t@[] history;
+string status_text = "";
+string move_log = "";
+
+// Online state.
+network@ net = null;
+uint64 net_peer = 0;
+bool online_mode = false;
+bool online_is_host = true;
+string[] pending_net; // messages received while the connection was still opening
+
+// ------------------------------------------------------------- speech ------
+void set_status(string t, bool interrupt = true) {
+	status_text = t;
+	print("[status] " + t);
+	if (mode_chosen) speak(t, interrupt); // the game's own voice, both modes
+}
+
+void announce(string t) {
+	if (mode_chosen && blind_mode) speak(t);
+}
+
+void skip_logo() {
+	if (!logo_playing) return;
+	s_logo.stop();
+	logo_playing = false;
+	print("[logo skipped]");
+	if (mode_chosen || tts.speaking) return;
+	speak(PROMPT, true); // keep the question flowing after the logo stops
+}
+
+// --------------------------------------------------------------- board ------
+string square_desc(int idx) {
+	int p = sq[idx];
+	if (p == 0) return square_name(idx) + ", empty";
+	return square_name(idx) + ", " + piece_words(p);
+}
+
+void print_board() {
+	print("  a b c d e f g h");
+	for (int r = 0; r < 8; r++) {
+		string line = "" + (8 - r);
+		for (int c = 0; c < 8; c++) line += " " + piece_char(sq[r * 8 + c]);
+		print(line);
+	}
+	print("  a b c d e f g h");
+	print("Cursor: " + square_desc(cursor) + (selected >= 0 ? " (selected)" : ""));
+}
+
+string piece_noun(int t) {
+	if (t == P_KING) return "king";
+	if (t == P_QUEEN) return "queen";
+	if (t == P_ROOK) return "rook";
+	if (t == P_BISHOP) return "bishop";
+	if (t == P_KNIGHT) return "knight";
+	return "pawn";
+}
+
+// "White plays e4", "Black plays e5", "White plays bishop c5",
+// "White plays e takes d5", "White plays e8, promoting to queen".
+string move_play_text(move_t@ m) {
+	string side = piece_is_white(m.piece) ? "White" : "Black";
+	if ((m.flags & MOVE_CK) != 0) return side + " castles king side";
+	if ((m.flags & MOVE_CQ) != 0) return side + " castles queen side";
+	string body;
+	if (piece_type(m.piece) == P_PAWN) {
+		if (m.captured != 0) body = square_name(m.from).substr(0, 1) + " takes " + square_name(m.to);
+		else body = square_name(m.to);
+	} else {
+		body = piece_noun(piece_type(m.piece)) + (m.captured != 0 ? " takes " : " ") + square_name(m.to);
+	}
+	if (m.promo != 0) body += ", promoting to " + piece_noun(m.promo);
+	return side + " plays " + body;
+}
+
+void rebuild_move_log() {
+	move_log = "";
+	for (uint i = 0; i < history.length(); i++) {
+		if (piece_is_white(history[i].piece)) {
+			if (move_log.length() > 0) move_log += " ";
+			move_log += "" + (i / 2 + 1) + ". ";
+		}
+		move_log += move_play_text(history[i]) + ". ";
+	}
+}
+
+bool shift_held() { return key_down(KEY_LSHIFT) || key_down(KEY_RSHIFT); }
+bool ctrl_held() { return key_down(KEY_LCTRL) || key_down(KEY_RCTRL); }
+
+string turn_hint() {
+	if (online_mode) return (white_to_move == online_is_host) ? ", your move" : ", waiting for your opponent";
+	if (vs_computer) return white_to_move ? ", your move" : "";
+	return "";
+}
+
+// ------------------------------------------------------------ game flow -----
+void apply_move(move_t@ m, bool from_net = false) {
+	bool mover_white = piece_is_white(m.piece);
+	board_make(m);
+	history.insert_last(m);
+	selected = -1;
+	s_move.play();
+	rebuild_move_log();
+
+	string played = move_play_text(m);
+	print("[move] " + played);
+	if (mode_chosen) speak(played, true);
+
+	legal_moves(false);
+	bool has_moves = gen_pool.length() > 0;
+	if (!has_moves) {
+		game_over = true;
+		if (in_check(white_to_move)) {
+			set_status((mover_white ? "Black" : "White") + " is checkmated. "
+					+ (mover_white ? "White" : "Black") + " wins the match. "
+					+ "Press N for a new game or M for the main menu.", false);
+		} else {
+			set_status("Stalemate, a draw. Press N for a new game or M for the main menu.", false);
+		}
+	} else if (insufficient_material()) {
+		game_over = true;
+		set_status("Draw, insufficient material. Press N for a new game or M for the main menu.", false);
+	} else if (halfmove_clock >= 100) {
+		game_over = true;
+		set_status("Draw by the 50-move rule. Press N for a new game or M for the main menu.", false);
+	} else {
+		string side = white_to_move ? "White" : "Black";
+		if (in_check(white_to_move)) set_status("Check, " + side + " to move" + turn_hint() + ".", false);
+		else set_status(side + " to move" + turn_hint() + ".", false);
+	}
+	if (online_mode && !from_net) net_send(net_move_msg(m));
+	print_board();
+}
+
+void run_ai_turn() {
+	if (game_over) return;
+	set_status("The computer is thinking...");
+	move_t@ m = ai_find_move(ai_depth, ai_ms);
+	if (@m != null) apply_move(m);
+}
+
+void handle_enter() {
+	if (game_over) return;
+	if (online_mode && white_to_move != online_is_host) {
+		s_error.play();
+		speak("Not your turn. Waiting for " + (white_to_move ? "White" : "Black") + ".", true);
+		return;
+	}
+	if (selected < 0) {
+		int p = sq[cursor];
+		if (p != 0 && piece_is_white(p) == white_to_move) {
+			selected = cursor;
+			s_click.play();
+			legal_moves(false);
+			int count = 0;
+			for (uint i = 0; i < gen_pool.length(); i++) {
+				if (gen_pool[i].from == selected) count++;
+			}
+			announce(square_desc(cursor) + ", " + count + (count == 1 ? " move." : " moves."));
+		} else {
+			s_error.play();
+			announce(square_desc(cursor));
+		}
+		return;
+	}
+	if (cursor == selected) {
+		selected = -1;
+		announce(square_desc(cursor));
+		return;
+	}
+	legal_moves(false);
+	move_t@ chosen = null;
+	int promo_options = 0;
+	for (uint i = 0; i < gen_pool.length(); i++) {
+		move_t@ m = gen_pool[i];
+		if (m.from == selected && m.to == cursor) {
+			@chosen = m;
+			if (m.promo != 0) promo_options++;
+		}
+	}
+	if (@chosen == null) {
+		s_error.play();
+		announce(square_desc(cursor));
+		return;
+	}
+	if (promo_options > 1) @chosen = wait_promotion(chosen);
+	selected = -1;
+	apply_move(chosen);
+	if (!game_over && vs_computer && !white_to_move) run_ai_turn();
+}
+
+move_t@ wait_promotion(move_t@ sample) {
+	speak("Promote to: press 1 for queen, 2 for rook, 3 for bishop, 4 for knight.", true);
+	int want = P_QUEEN;
+	while (true) {
+		wait(5);
+		if (key_pressed(KEY_1)) { want = P_QUEEN; break; }
+		if (key_pressed(KEY_2)) { want = P_ROOK; break; }
+		if (key_pressed(KEY_3)) { want = P_BISHOP; break; }
+		if (key_pressed(KEY_4)) { want = P_KNIGHT; break; }
+	}
+	legal_moves(false);
+	for (uint i = 0; i < gen_pool.length(); i++) {
+		move_t@ m = gen_pool[i];
+		if (m.from == sample.from && m.to == sample.to && m.promo == want) return m;
+	}
+	return sample;
+}
+
+void do_undo() {
+	if (online_mode) {
+		speak("Undo is not available in an online game.", true);
+		return;
+	}
+	if (history.length() == 0) {
+		set_status("Nothing to undo.");
+		return;
+	}
+	int guard = 0;
+	while (history.length() > 0 && guard < 8) {
+		guard++;
+		board_unmake(history[history.length() - 1]);
+		history.remove_at(history.length() - 1);
+		// In computer mode, keep taking back until it is the human's turn again.
+		if (vs_computer && !white_to_move) continue;
+		break;
+	}
+	game_over = false;
+	selected = -1;
+	rebuild_move_log();
+	set_status("Move taken back. " + (white_to_move ? "White" : "Black") + " to move" + turn_hint() + ".");
+	print_board();
+}
+
+void do_resign() {
+	if (game_over) return;
+	game_over = true;
+	selected = -1;
+	if (online_mode) {
+		net_send("RESIGN");
+		set_status("You resigned. " + (online_is_host ? "Black" : "White") + " wins the match. "
+				+ "Press M for the main menu.");
+	} else if (vs_computer) {
+		set_status("You resigned. The computer wins the match. "
+				+ "Press N for a new game or M for the main menu.");
+	} else {
+		string resigner = white_to_move ? "White" : "Black";
+		string winner = white_to_move ? "Black" : "White";
+		set_status(resigner + " resigned. " + winner + " wins the match. "
+				+ "Press N for a new game or M for the main menu.");
+	}
+	print_board();
+}
+
+void start_match() {
+	board_reset();
+	history.resize(0);
+	rebuild_move_log();
+	game_over = false;
+	selected = -1;
+	cursor = 52;
+}
+
+void new_game(int mode) {
+	start_match();
+	if (mode == 4) {
+		vs_computer = false;
+		set_status("Match started. Two players on this keyboard. White to move.", true);
+	} else {
+		vs_computer = true;
+		if (mode == 1) { ai_depth = 1; ai_ms = 1500; }
+		else if (mode == 2) { ai_depth = 3; ai_ms = 3000; }
+		else { ai_depth = 4; ai_ms = 6000; }
+		string level = (mode == 1 ? "easy" : (mode == 2 ? "normal" : "hard"));
+		set_status("Match started. You play White against the computer on " + level
+				+ " difficulty. White to move, your move.", true);
+	}
+	print_board();
+}
+
+void start_online_match(bool host) {
+	start_match();
+	vs_computer = false;
+	online_mode = true;
+	online_is_host = host;
+	if (host) set_status("Match started. You play White. Your move.", true);
+	else set_status("Match started. You play Black. White to move. Waiting for your opponent.", true);
+	print_board();
+}
+
+bool prompt_difficulty() {
+	speak("Computer difficulty. Press 1 for easy, 2 for normal, 3 for hard. Escape cancels.", true);
+	while (true) {
+		wait(5);
+		if (key_pressed(KEY_1)) { new_game(1); return true; }
+		if (key_pressed(KEY_2)) { new_game(2); return true; }
+		if (key_pressed(KEY_3)) { new_game(3); return true; }
+		if (key_pressed(KEY_ESCAPE)) { speak("Canceled.", true); return false; }
+	}
+	return false;
+}
+
+bool prompt_new_game() {
+	if (online_mode) {
+		speak("You are in an online game. Press M for the main menu to leave it.", true);
+		return false;
+	}
+	speak("New game. Press 1 for easy computer, 2 for normal, 3 for hard, 4 for two players. Escape cancels.", true);
+	while (true) {
+		wait(5);
+		if (key_pressed(KEY_1)) { new_game(1); return true; }
+		if (key_pressed(KEY_2)) { new_game(2); return true; }
+		if (key_pressed(KEY_3)) { new_game(3); return true; }
+		if (key_pressed(KEY_4)) { new_game(4); return true; }
+		if (key_pressed(KEY_ESCAPE)) { speak("Canceled.", true); return false; }
+	}
+	return false;
+}
+
+// -------------------------------------------------------------- online ------
+void net_send(string msg) {
+	if (@net != null && net_peer != 0) net.send_reliable(net_peer, msg, NET_CH);
+}
+
+string net_move_msg(move_t@ m) {
+	return "MOVE|" + m.from + "|" + m.to + "|" + m.promo;
+}
+
+void online_shutdown() {
+	if (@net != null) net.destroy();
+	@net = null;
+	net_peer = 0;
+	online_mode = false;
+	online_is_host = true;
+	pending_net.resize(0);
+}
+
+// Applies a move that arrived over the network.
+void net_apply_move(int from, int to, int promo) {
+	legal_moves(false);
+	move_t@ m = null;
+	for (uint i = 0; i < gen_pool.length(); i++) {
+		move_t@ c = gen_pool[i];
+		if (c.from != from || c.to != to) continue;
+		if (promo != 0) {
+			if (c.promo == promo) { @m = c; break; }
+		} else if (c.promo == 0 || c.promo == P_QUEEN) {
+			@m = c;
+			break;
+		}
+	}
+	if (@m == null) {
+		speak("The opponent's move does not fit this position.", true);
+		return;
+	}
+	apply_move(m, true);
+}
+
+void handle_net_message(string msg) {
+	if (msg.substr(0, 5) == "MOVE|") {
+		string[]@ p = msg.split("|");
+		if (p.length() < 4) return;
+		net_apply_move(parse_int(p[1]), parse_int(p[2]), parse_int(p[3]));
+	} else if (msg.substr(0, 4) == "MSG|") {
+		speak("Your opponent says: " + msg.substr(4), true);
+	} else if (msg == "RESIGN") {
+		if (game_over) return;
+		game_over = true;
+		selected = -1;
+		set_status("Your opponent resigned. You win the match. Press M for the main menu.", true);
+		print_board();
+	}
+}
+
+// Returns false when the connection was lost.
+bool online_poll() {
+	if (@net == null) return true;
+	while (pending_net.length() > 0) {
+		string queued = pending_net[0];
+		pending_net.remove_at(0);
+		handle_net_message(queued);
+	}
+	const network_event@ ev = net.request(0);
+	while (@ev != null) {
+		if (ev.type == event_receive && ev.channel == NET_CH) {
+			handle_net_message(ev.message);
+		} else if (ev.type == event_disconnect || ev.type == event_disconnect_timeout) {
+			online_shutdown();
+			speak("Your opponent disconnected. Returning to the main menu.", true);
+			return false;
+		}
+		@ev = net.request(0);
+	}
+	return true;
+}
+
+bool online_host_flow() {
+	@net = network();
+	if (@net == null || !net.setup_server(CHESS_PORT, 3, 4)) {
+		online_shutdown();
+		speak("Could not start hosting. Is another game already running? "
+				+ "Press escape to go back.", true);
+		return false;
+	}
+	speak("Hosting an online game on port " + CHESS_PORT
+			+ ". Give your opponent this computer's IP address, then wait. "
+			+ "Press escape to cancel.", true);
+	print("[online] hosting on port " + CHESS_PORT);
+	timer t;
+	t.restart();
+	while (t.elapsed < 300000.0) {
+		wait(5);
+		if (key_pressed(KEY_ESCAPE)) {
+			online_shutdown();
+			speak("Canceled.", true);
+			return false;
+		}
+		const network_event@ ev = net.request(0);
+		if (@ev == null) continue;
+		if (ev.type == event_connect) {
+			net_peer = ev.peer_id;
+			net_send("WELCOME|black");
+			print("[online] opponent connected");
+			return true;
+		}
+	}
+	online_shutdown();
+	speak("Stopped hosting.", true);
+	return false;
+}
+
+bool online_join_flow(string addr) {
+	@net = network();
+	if (@net == null || !net.setup_client(3, 4)) {
+		online_shutdown();
+		speak("Could not start networking. Press escape to go back.", true);
+		return false;
+	}
+	net_peer = net.connect(addr, CHESS_PORT);
+	if (net_peer == 0) {
+		online_shutdown();
+		speak("Could not reach " + addr + ".", true);
+		return false;
+	}
+	speak("Connecting to " + addr + ". Press escape to cancel.", true);
+	timer t;
+	t.restart();
+	while (t.elapsed < 15000.0) {
+		wait(5);
+		if (key_pressed(KEY_ESCAPE)) {
+			online_shutdown();
+			speak("Canceled.", true);
+			return false;
+		}
+		const network_event@ ev = net.request(0);
+		if (@ev == null) continue;
+		if (ev.type == event_receive && ev.channel == NET_CH) {
+			if (ev.message.substr(0, 7) == "WELCOME") {
+				print("[online] connected to " + addr);
+				return true;
+			}
+			// Anything the host already sent is replayed once the match runs.
+			pending_net.insert_last(ev.message);
+		}
+		if (ev.type == event_disconnect || ev.type == event_disconnect_timeout) {
+			online_shutdown();
+			speak("Could not connect to " + addr + ".", true);
+			return false;
+		}
+	}
+	online_shutdown();
+	speak("No answer from " + addr + ".", true);
+	return false;
+}
+
+string ask_address() {
+	input_form f("Join an online game");
+	f.add_text_field("addr", "Opponent's address", "127.0.0.1", true);
+	dictionary@ d = f.run();
+	if (@d == null || f.user_canceled) return "";
+	string addr = "";
+	d.get("addr", addr);
+	if (addr == "") return "";
+	return addr;
+}
+
+void handle_chat() {
+	if (!online_mode) {
+		speak("Chat is only available during an online game.", true);
+		return;
+	}
+	input_form f("Send a message");
+	f.add_text_field("msg", "Message", "", true);
+	dictionary@ d = f.run();
+	if (@d == null || f.user_canceled) {
+		speak("Canceled.", true);
+		return;
+	}
+	string text = "";
+	d.get("msg", text);
+	if (text == "") return;
+	speak("You say: " + text, true);
+	net_send("MSG|" + text);
+}
+
+// --------------------------------------------------------------- menu -------
+// Returns "play" when a match should start or "quit" when the game should exit.
+string show_main_menu() {
+	menu m;
+	m.focus_first_item = true;
+	m.sounds_prefix = "sounds/";
+	m.click_sound = "ui/click.wav";
+	m.select_sound = "ui/move.wav";
+	m.edge_sound = "ui/error.wav";
+	m.intro_text = "Chess main menu. " + (blind_mode ? "Blind mode." : "Sighted mode.")
+		+ " Use the up and down arrows to choose an option and press enter. "
+		+ "Press escape twice to quit.";
+	m.add_item("Play against the computer", "cpu");
+	m.add_item("Two players on this keyboard", "local");
+	m.add_item("Host an online game", "host");
+	m.add_item("Join an online game", "join");
+	m.add_item("How to play", "help");
+	m.add_item(blind_mode ? "Switch to sighted mode" : "Switch to blind mode", "mode");
+	m.add_item("Quit", "quit");
+	bool esc_armed = false;
+	timer esc_t;
+	while (true) {
+		wait(5);
+		if (m.monitor()) continue;
+		if (m.selected_item < 0) {
+			// Escape / cancel: press twice to quit.
+			if (esc_armed && esc_t.elapsed < 1500) return "quit";
+			esc_armed = true;
+			esc_t.restart();
+			speak("Press escape again to quit chess.", true);
+			m.automatic_intro = true; // repeat the menu so the player knows where they are
+			continue;
+		}
+		esc_armed = false;
+		string id = m.selected_item_id;
+		if (id == "quit") return "quit";
+		if (id == "mode") {
+			blind_mode = !blind_mode;
+			m.set_item_text(5, blind_mode ? "Switch to sighted mode" : "Switch to blind mode");
+			m.automatic_intro = true;
+			continue;
+		}
+		if (id == "help") {
+			speak(CONTROLS_HELP, true);
+			continue;
+		}
+		if (id == "cpu") {
+			if (prompt_difficulty()) return "play";
+			continue;
+		}
+		if (id == "local") {
+			new_game(4);
+			return "play";
+		}
+		if (id == "host") {
+			if (online_host_flow()) {
+				start_online_match(true);
+				return "play";
+			}
+			continue;
+		}
+		if (id == "join") {
+			string addr = ask_address();
+			if (addr != "" && online_join_flow(addr)) {
+				start_online_match(false);
+				return "play";
+			}
+			continue;
+		}
+	}
+	return "quit";
+}
+
+// ------------------------------------------------------------ game loop -----
+// Runs one match. Returns true when the application should quit.
+bool game_loop() {
+	print_board();
+	bool quit_app = false;
+	bool to_menu = false;
+	bool esc_armed = false;
+	timer esc_t;
+	bool resign_armed = false;
+	timer resign_t;
+	while (!quit_app && !to_menu) {
+		wait(5);
+
+		if (online_mode && !online_poll()) {
+			to_menu = true;
+			break;
+		}
+
+		// Cursor movement: arrows go one square, Shift/Ctrl with left or
+		// right arrow walk the diagonals.
+		int old_cursor = cursor;
+		int dr = 0;
+		int dc = 0;
+		bool k_left = key_pressed(KEY_LEFT);
+		bool k_right = key_pressed(KEY_RIGHT);
+		if (k_left || k_right) {
+			if (shift_held()) dr = -1;
+			else if (ctrl_held()) dr = 1;
+			dc = k_left ? -1 : 1;
+		} else if (key_pressed(KEY_UP)) dr = -1;
+		else if (key_pressed(KEY_DOWN)) dr = 1;
+		if (dr != 0 || dc != 0) {
+			int nr = cursor / 8 + dr;
+			int nc = cursor % 8 + dc;
+			if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) cursor = nr * 8 + nc;
+			else s_error.play();
+		}
+		if (cursor != old_cursor) {
+			if (selected >= 0) {
+				// Say whether this square is a legal destination.
+				legal_moves(false);
+				bool is_target = false;
+				for (uint i = 0; i < gen_pool.length(); i++) {
+					if (gen_pool[i].from == selected && gen_pool[i].to == cursor) {
+						is_target = true;
+						break;
+					}
+				}
+				if (is_target) announce("Legal move to " + square_desc(cursor));
+				else announce(square_desc(cursor));
+			} else {
+				announce(square_desc(cursor));
+			}
+		}
+
+		if (key_pressed(KEY_RETURN)) handle_enter();
+		if (key_pressed(KEY_N)) prompt_new_game();
+		if (key_pressed(KEY_U)) do_undo();
+		if (key_pressed(KEY_L)) {
+			if (move_log == "") speak("No moves have been played yet.", true);
+			else speak("Move list. " + move_log, true);
+		}
+		if (key_pressed(KEY_M)) to_menu = true;
+		if (key_pressed(KEY_C)) handle_chat();
+		if (key_pressed(KEY_R)) {
+			if (resign_armed && resign_t.elapsed < 1500) {
+				resign_armed = false;
+				do_resign();
+			} else {
+				resign_armed = true;
+				resign_t.restart();
+				speak("Press R again to resign.", true);
+			}
+		} else if (resign_t.elapsed > 1500) {
+			resign_armed = false;
+		}
+
+		if (key_pressed(KEY_ESCAPE)) {
+			if (esc_armed && esc_t.elapsed < 1500) quit_app = true;
+			else {
+				esc_armed = true;
+				esc_t.restart();
+				speak("Press escape again to quit.", true);
+			}
+		} else if (esc_t.elapsed > 1500) {
+			esc_armed = false;
+		}
+	}
+	online_shutdown();
+	return quit_app;
+}
+
+// ------------------------------------------------------------ start-up ------
+void choose_mode(bool blind) {
+	if (mode_chosen) return;
+	mode_chosen = true;
+	blind_mode = blind;
+	s_logo.stop();
+	logo_playing = false;
+	s_click.play();
+	print((blind ? "Blind mode." : "Sighted mode."));
+	speak((blind ? "Blind mode." : "Sighted mode.") + " Chess.", true);
+}
+
+int main() {
+	use_sr = false; // the game speaks with NVGT's own built-in voice
+	core_init();
+	board_reset();
+	show_window("Chess");
+
+	if (s_logo.load("sounds/logo.ogg")) {
+		s_logo.play();
+		logo_playing = true;
+	} else print("warning: could not load sounds/logo.ogg");
+	s_click.load("sounds/ui/click.wav");
+	s_move.load("sounds/ui/move.wav");
+	s_error.load("sounds/ui/error.wav");
+
+	// Let the logo start, then ask the question.
+	wait(1200);
+	speak(PROMPT, true);
+
+	// Logo / blind-or-sighted question. The logo can be skipped with the Tab
+	// key pressed twice, with Space, or with Enter.
+	int enters = 0;
+	int ups = 0;
+	int tabs = 0;
+	timer enter_window;
+	timer enter_idle;
+	timer up_window;
+	timer tab_window;
+	timer prompt_timer;
+	prompt_timer.restart();
+	while (!mode_chosen) {
+		wait(5);
+		if (key_pressed(KEY_ESCAPE)) return 0;
+		if (key_pressed(KEY_SPACE)) skip_logo();
+		if (key_pressed(KEY_TAB)) {
+			if (tabs == 0 || tab_window.elapsed > 900) {
+				tabs = 1;
+				tab_window.restart();
+			} else {
+				tabs++;
+			}
+			if (tabs >= 2) {
+				tabs = 0;
+				skip_logo();
+			}
+		}
+		if (key_pressed(KEY_RETURN)) {
+			skip_logo();
+			if (enters == 0 || enter_window.elapsed > 800) {
+				enters = 1;
+				enter_window.restart();
+			} else {
+				enters++;
+			}
+			enter_idle.restart();
+			if (enters >= 2) choose_mode(true);
+		}
+		if (key_pressed(KEY_UP)) {
+			if (ups == 0 || up_window.elapsed > 1500) {
+				ups = 1;
+				up_window.restart();
+			} else {
+				ups++;
+			}
+			if (ups >= 3) choose_mode(false);
+		}
+		if (!mode_chosen && enters == 1 && enter_idle.elapsed > 450) {
+			// A single Enter is treated like a single tap: repeat the question.
+			enters = 0;
+			if (!tts.speaking) speak(PROMPT, true);
+		}
+		// Never leave the player at a silent screen.
+		if (!mode_chosen && prompt_timer.elapsed > 7000 && !tts.speaking && enters == 0 && ups == 0) {
+			speak(PROMPT, true);
+			prompt_timer.restart();
+		}
+	}
+
+	bool quit_app = false;
+	while (!quit_app) {
+		string action = show_main_menu();
+		if (action == "quit") break;
+		if (action == "play") quit_app = game_loop();
+	}
+	online_shutdown();
+	return 0;
+}

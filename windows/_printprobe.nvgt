@@ -1,0 +1,4 @@
+int main() {
+	print("PROBE_OK");
+	return 0;
+}

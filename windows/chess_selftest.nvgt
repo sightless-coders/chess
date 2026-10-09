@@ -1,0 +1,184 @@
+// chess_selftest.nvgt - Verifies the NVGT chess engine against the same known
+// counts the Android (Java) version is tested with. Exits 0 when everything
+// passes, 1 otherwise. Compiled and run by build_windows.bat.
+
+#include "chess_core.nvgt"
+
+int failures = 0;
+
+void expect(int got, int want, string label) {
+	if (got == want) {
+		print("PASS  " + label + ": " + got + "\n");
+	} else {
+		print("FAIL  " + label + ": got " + got + ", expected " + want + "\n");
+		failures++;
+	}
+}
+
+int char_piece(string ch) {
+	int type = 0;
+	if (ch == "k" || ch == "K") type = P_KING;
+	else if (ch == "q" || ch == "Q") type = P_QUEEN;
+	else if (ch == "r" || ch == "R") type = P_ROOK;
+	else if (ch == "b" || ch == "B") type = P_BISHOP;
+	else if (ch == "n" || ch == "N") type = P_KNIGHT;
+	else if (ch == "p" || ch == "P") type = P_PAWN;
+	else return 0;
+	if (ch == "K" || ch == "Q" || ch == "R" || ch == "B" || ch == "N" || ch == "P") return type + C_WHITE;
+	return type;
+}
+
+// Places one FEN rank row (e.g. "r3k2r") on the board.
+void setup_row(int row, string pattern) {
+	int c = 0;
+	for (uint i = 0; i < pattern.length() && c < 8; i++) {
+		string ch = pattern.substr(i, 1);
+		if (ch == "1") c += 1;
+		else if (ch == "2") c += 2;
+		else if (ch == "3") c += 3;
+		else if (ch == "4") c += 4;
+		else if (ch == "5") c += 5;
+		else if (ch == "6") c += 6;
+		else if (ch == "7") c += 7;
+		else if (ch == "8") c += 8;
+		else {
+			sq[row * 8 + c] = char_piece(ch);
+			c++;
+		}
+	}
+}
+
+void clear_for_fen() {
+	for (int i = 0; i < 64; i++) sq[i] = 0;
+	white_to_move = true;
+	castling_rights = 0;
+	ep_target = -1;
+	halfmove_clock = 0;
+}
+
+void setup_kiwipete() {
+	clear_for_fen();
+	setup_row(0, "r3k2r");
+	setup_row(1, "p1ppqpb1");
+	setup_row(2, "bn2pnp1");
+	setup_row(3, "3PN3");
+	setup_row(4, "1p2P3");
+	setup_row(5, "2N2Q1p");
+	setup_row(6, "PPPBBPPP");
+	setup_row(7, "R3K2R");
+	castling_rights = CK_WK | CK_WQ | CK_BK | CK_BQ;
+}
+
+void setup_en_passant() {
+	clear_for_fen();
+	setup_row(1, "2p5");
+	setup_row(2, "3p4");
+	setup_row(3, "KP5r");
+	setup_row(4, "1R3p1k");
+	setup_row(6, "4P1P1");
+}
+
+void setup_scholars_mate() {
+	clear_for_fen();
+	setup_row(0, "rnb1kbnr");
+	setup_row(1, "pppp1ppp");
+	setup_row(3, "4p3");
+	setup_row(4, "6Pq");
+	setup_row(5, "5P2");
+	setup_row(6, "PPPPP2P");
+	setup_row(7, "RNBQKBNR");
+}
+
+void setup_stalemate() {
+	clear_for_fen();
+	setup_row(0, "7k");
+	setup_row(1, "5Q2");
+	setup_row(2, "6K1");
+	white_to_move = false;
+}
+
+int main() {
+	core_init();
+
+	// Starting position.
+	board_reset();
+	expect(perft(1), 20, "start depth 1");
+	expect(perft(2), 400, "start depth 2");
+	expect(perft(3), 8902, "start depth 3");
+	expect(perft(4), 197281, "start depth 4");
+
+	// Kiwipete: exercises castling, pins and checks.
+	setup_kiwipete();
+	expect(perft(1), 48, "kiwipete depth 1");
+	expect(perft(2), 2039, "kiwipete depth 2");
+	expect(perft(3), 97862, "kiwipete depth 3");
+
+	// En passant position.
+	setup_en_passant();
+	expect(perft(1), 14, "en passant depth 1");
+	expect(perft(2), 191, "en passant depth 2");
+	expect(perft(3), 2812, "en passant depth 3");
+
+	// Checkmate detection (Black delivered scholar's mate).
+	setup_scholars_mate();
+	legal_moves(false);
+	expect(gen_pool.length() == 0 && in_check(true) ? 1 : 0, 1, "checkmate detected");
+
+	// Stalemate detection.
+	setup_stalemate();
+	legal_moves(false);
+	expect(gen_pool.length() == 0 && !in_check(false) ? 1 : 0, 1, "stalemate detected");
+
+	// AI returns a legal move from the start position.
+	board_reset();
+	try {
+		move_t@ m = ai_find_move(3, 2000);
+		if (@m == null) {
+			expect(0, 1, "AI returned a move");
+		} else {
+			bool found = false;
+			legal_moves(false);
+			for (uint i = 0; i < gen_pool.length(); i++) {
+				if (gen_pool[i].from == m.from && gen_pool[i].to == m.to && gen_pool[i].promo == m.promo) {
+					found = true;
+					break;
+				}
+			}
+			expect(found ? 1 : 0, 1, "AI move is legal (" + move_notation(m) + ")");
+		}
+	} catch {
+		print("EXCEPTION in AI test: " + get_exception_info() + "\n");
+		failures++;
+	}
+
+	// AI finds mate in one (scholar's mate position, White to move).
+	clear_for_fen();
+	setup_row(0, "r1bqkbnr");
+	setup_row(1, "pppp1ppp");
+	setup_row(2, "2n5");
+	setup_row(3, "4p3");
+	setup_row(4, "2B1P3");
+	setup_row(5, "5Q2");
+	setup_row(6, "PPPP1PPP");
+	setup_row(7, "RNBQKBNR");
+	move_t@ finisher = null;
+	try {
+		@finisher = ai_find_move(3, 3000);
+	} catch {
+		print("EXCEPTION in mate-in-1 test: " + get_exception_info() + "\n");
+		failures++;
+	}
+	if (@finisher == null) {
+		expect(0, 1, "AI found mate in 1");
+	} else {
+		board_make(finisher);
+		legal_moves(false);
+		bool mates = gen_pool.length() == 0 && in_check(white_to_move);
+		board_unmake(finisher);
+		expect(mates ? 1 : 0, 1, "AI finds mate in 1 (" + move_notation(finisher) + ")");
+	}
+
+	if (failures == 0) print("ALL TESTS PASSED");
+	else print(failures + " TEST(S) FAILED");
+	return failures > 0 ? 1 : 0;
+}

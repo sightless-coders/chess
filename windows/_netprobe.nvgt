@@ -1,0 +1,19 @@
+// _netprobe.nvgt - compile-only probe for the NVGT networking API.
+int main() {
+	network@ n = null;
+	@n = network();
+	if (@n == null) return 1;
+	if (!n.setup_server(47772, 3, 2)) return 2;
+	if (!n.setup_client(3, 4)) return 3;
+	uint64 peer = n.connect("127.0.0.1", 47772);
+	if (peer == 0) return 4;
+	const network_event@ ev = n.request(0);
+	if (@ev != null) {
+		if (ev.type == event_receive) { string m = ev.message; }
+		if (ev.type == event_connect) { uint64 p2 = ev.peer_id; }
+		int ch = ev.channel;
+	}
+	n.send_reliable(peer, "HELLO", 0);
+	n.destroy();
+	return 0;
+}
