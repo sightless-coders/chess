@@ -49,7 +49,7 @@ public class StatsRepository {
                                 userId,
                                 auth.getEmail(),
                                 "Player",
-                                0, 0, 0,
+                                0, 0, 0, 1200, // Default starting points
                                 System.currentTimeMillis(),
                                 System.currentTimeMillis()
                         );
@@ -92,10 +92,14 @@ public class StatsRepository {
     }
 
     public void recordWin(VoidCallback callback) {
+        recordWin(25, callback); // Default +25 points
+    }
+
+    public void recordWin(int pointsChange, VoidCallback callback) {
         getStats(new StatsCallback() {
             @Override
             public void onSuccess(UserStats stats) {
-                updateStats(stats.withWin(), callback);
+                updateStats(stats.withWin(pointsChange), callback);
             }
 
             @Override
@@ -106,10 +110,14 @@ public class StatsRepository {
     }
 
     public void recordLoss(VoidCallback callback) {
+        recordLoss(25, callback); // Default -25 points
+    }
+
+    public void recordLoss(int pointsChange, VoidCallback callback) {
         getStats(new StatsCallback() {
             @Override
             public void onSuccess(UserStats stats) {
-                updateStats(stats.withLoss(), callback);
+                updateStats(stats.withLoss(pointsChange), callback);
             }
 
             @Override

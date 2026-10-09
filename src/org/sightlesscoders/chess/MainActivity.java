@@ -81,6 +81,15 @@ public class MainActivity extends Activity {
     private StatsRepository statsRepository;
     private boolean vsOnline = false;
 
+    // Clock / time control
+    private boolean clockEnabled = false;
+    private long clockBaseMs = 0;
+    private long clockIncrementMs = 0;
+    private long whiteTimeMs = 0;
+    private long blackTimeMs = 0;
+    private long lastMoveTimeMs = 0;
+    private boolean clockRunning = false;
+
     // Startup prompt overlay.
     private FrameLayout frame;
     private LinearLayout overlay;
@@ -550,6 +559,11 @@ public class MainActivity extends Activity {
         boardView.clearSelection();
         boardView.refresh();
         boardView.setInputEnabled(modeChosen);
+        // Reset clock
+        whiteTimeMs = clockBaseMs;
+        blackTimeMs = clockBaseMs;
+        lastMoveTimeMs = 0;
+        clockRunning = clockEnabled;
 
         if (vsComputer) {
             setStatus("New game — you play White against the computer. Your move.");
@@ -627,6 +641,26 @@ public class MainActivity extends Activity {
     private void applyMove(Move m) {
         boolean moverWasWhite = Board.isWhite(m.piece);
         String mover = moverWasWhite ? "White" : "Black";
+        long now = System.currentTimeMillis();
+
+        // Handle clock: subtract time from player who just moved, add increment
+        if (clockEnabled && clockRunning && lastMoveTimeMs > 0) {
+            long elapsed = now - lastMoveTimeMs;
+            if (moverWasWhite) {
+                whiteTimeMs -= elapsed;
+                if (whiteTimeMs < 0) whiteTimeMs = 0;
+                whiteTimeMs += clockIncrementMs;
+            } else {
+                blackTimeMs -= elapsed;
+                if (blackTimeMs < 0) blackTimeMs = 0;
+                blackTimeMs += clockIncrementMs;
+            }
+            // Check for flag fall
+            if ((moverWasWhite && whiteTimeMs <= 0) || (!moverWasWhite && blackTimeMs <= 0)) {
+                handleFlagFall(moverWasWhite);
+                return;
+            }
+        }
 
         board.make(m);
         history.add(m);
@@ -635,23 +669,77 @@ public class MainActivity extends Activity {
         boardView.clearSelection();
         if (sfx != null) sfx.play("ui/move");
 
+        // Start clock for next player
+        if (clockEnabled) {
+            lastMoveTimeMs = now;
+            clockRunning = true;
+        }
+
         String status;
         List<Move> legal = board.legalMoves();
         if (legal.isEmpty()) {
             gameOver = true;
+            clockRunning = false;
             if (board.inCheck()) {
                 String winner = moverWasWhite ? "Black" : "White";
+                String loser = moverWasWhite ? "White" : "Black";
                 status = m.notated() + ". Checkmate! " + winner
                         + " wins. Tap New game to play again.";
+                // Record stats for logged-in user
+                if (vsOnline) {
+                    if (winner.equals("White")) {
+                        statsRepository.recordWin(25, new StatsRepository.VoidCallback() {
+                            @Override public void onSuccess() {}
+                            @Override public void onError(Exception e) {}
+                        });
+                    } else {
+                        statsRepository.recordLoss(25, new StatsRepository.VoidCallback() {
+                            @Override public void onSuccess() {}
+                            @Override public void onError(Exception e) {}
+                        });
+                    }
+                } else if (vsComputer) {
+                    if (winner.equals("White")) {
+                        statsRepository.recordWin(new StatsRepository.VoidCallback() {
+                            @Override public void onSuccess() {}
+                            @Override public void onError(Exception e) {}
+                        });
+                    } else {
+                        statsRepository.recordLoss(new StatsRepository.VoidCallback() {
+                            @Override public void onSuccess() {}
+                            @Override public void onError(Exception e) {}
+                        });
+                    }
+                }
             } else {
                 status = m.notated() + ". Stalemate — draw. Tap New game to play again.";
+                if (vsOnline || vsComputer) {
+                    statsRepository.recordDraw(new StatsRepository.VoidCallback() {
+                        @Override public void onSuccess() {}
+                        @Override public void onError(Exception e) {}
+                    });
+                }
             }
         } else if (board.insufficientMaterial()) {
             gameOver = true;
+            clockRunning = false;
             status = m.notated() + ". Draw — insufficient material.";
+            if (vsOnline || vsComputer) {
+                statsRepository.recordDraw(new StatsRepository.VoidCallback() {
+                    @Override public void onSuccess() {}
+                    @Override public void onError(Exception e) {}
+                });
+            }
         } else if (board.halfmove >= 100) {
             gameOver = true;
+            clockRunning = false;
             status = m.notated() + ". Draw — 50-move rule.";
+            if (vsOnline || vsComputer) {
+                statsRepository.recordDraw(new StatsRepository.VoidCallback() {
+                    @Override public void onSuccess() {}
+                    @Override public void onError(Exception e) {}
+                });
+            }
         } else {
             String side = board.whiteToMove ? "White" : "Black";
             if (board.inCheck()) {
@@ -668,6 +756,62 @@ public class MainActivity extends Activity {
         boardView.setInputEnabled(!gameOver && modeChosen
                 && (!vsComputer || board.whiteToMove != AI_IS_BLACK));
         if (!gameOver) maybeStartAiTurn();
+    }
+
+    private void handleFlagFall(boolean flaggedPlayerWhite) {
+        gameOver = true;
+        clockRunning = false;
+        String flagged = flaggedPlayerWhite ? "White" : "Black";
+        String winner = flaggedPlayerWhite ? "Black" : "White";
+        setStatus(flagged + " flag falls. " + winner + " wins on time. Tap New game to play again.");
+        if (vsOnline) {
+            if (winner.equals("White")) {
+                statsRepository.recordWin(25, new StatsRepository.VoidCallback() {
+                    @Override public void onSuccess() {}
+                    @Override public void onError(Exception e) {}
+                });
+            } else {
+                statsRepository.recordLoss(25, new StatsRepository.VoidCallback() {
+                    @Override public void onSuccess() {}
+                    @Override public void onError(Exception e) {}
+                });
+            }
+        } else if (vsComputer) {
+            if (winner.equals("White")) {
+                statsRepository.recordWin(new StatsRepository.VoidCallback() {
+                    @Override public void onSuccess() {}
+                    @Override public void onError(Exception e) {}
+                });
+            } else {
+                statsRepository.recordLoss(new StatsRepository.VoidCallback() {
+                    @Override public void onSuccess() {}
+                    @Override public void onError(Exception e) {}
+                });
+            }
+        }
+        boardView.refresh();
+    }
+
+    // Format milliseconds as MM:SS or HH:MM:SS
+    private String formatTime(long ms) {
+        if (ms < 0) ms = 0;
+        long totalSeconds = ms / 1000;
+        long hours = totalSeconds / 3600;
+        long minutes = (totalSeconds % 3600) / 60;
+        long seconds = totalSeconds % 60;
+        String result = "";
+        if (hours > 0) {
+            result = hours + ":";
+            if (minutes < 10) result += "0";
+            result += minutes + ":";
+            if (seconds < 10) result += "0";
+            result += seconds;
+        } else {
+            result = minutes + ":";
+            if (seconds < 10) result += "0";
+            result += seconds;
+        }
+        return result;
     }
 
     private boolean isAiTurn() {
@@ -816,5 +960,26 @@ public class MainActivity extends Activity {
         intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(intent);
         finish();
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, android.view.KeyEvent event) {
+        // T key: check your time, Shift+T: check opponent's time
+        if (keyCode == android.view.KeyEvent.KEYCODE_T && clockEnabled) {
+            boolean shiftPressed = (event.getMetaState() & android.view.KeyEvent.META_SHIFT_ON) != 0;
+            if (shiftPressed) {
+                // Opponent's time
+                long oppTime = board.whiteToMove ? blackTimeMs : whiteTimeMs;
+                String oppName = board.whiteToMove ? "Black" : "White";
+                feedback(oppName + " time: " + formatTime(oppTime));
+            } else {
+                // Your time
+                long yourTime = board.whiteToMove ? whiteTimeMs : blackTimeMs;
+                String yourName = board.whiteToMove ? "White" : "Black";
+                feedback("Your time (" + yourName + "): " + formatTime(yourTime));
+            }
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
     }
 }

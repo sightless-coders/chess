@@ -11,11 +11,13 @@ public class UserStats {
     public final int losses;
     public final int draws;
     public final int totalGames;
+    public final int points; // Elo-like rating
     public final long createdAt;
     public final long updatedAt;
 
     public UserStats(String userId, String email, String displayName,
-                     int wins, int losses, int draws, long createdAt, long updatedAt) {
+                     int wins, int losses, int draws, int points,
+                     long createdAt, long updatedAt) {
         this.userId = userId;
         this.email = email;
         this.displayName = displayName;
@@ -23,6 +25,7 @@ public class UserStats {
         this.losses = losses;
         this.draws = draws;
         this.totalGames = wins + losses + draws;
+        this.points = points;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
     }
@@ -35,6 +38,7 @@ public class UserStats {
                 json.optInt("wins", 0),
                 json.optInt("losses", 0),
                 json.optInt("draws", 0),
+                json.optInt("points", 1200), // Default starting points
                 json.optLong("createdAt", System.currentTimeMillis()),
                 json.optLong("updatedAt", System.currentTimeMillis())
         );
@@ -48,6 +52,7 @@ public class UserStats {
             json.put("wins", wins);
             json.put("losses", losses);
             json.put("draws", draws);
+            json.put("points", points);
             json.put("createdAt", createdAt);
             json.put("updatedAt", System.currentTimeMillis());
         } catch (JSONException e) {
@@ -56,20 +61,20 @@ public class UserStats {
         return json;
     }
 
-    public UserStats withWin() {
-        return new UserStats(userId, email, displayName, wins + 1, losses, draws, createdAt, System.currentTimeMillis());
+    public UserStats withWin(int pointsChange) {
+        return new UserStats(userId, email, displayName, wins + 1, losses, draws, points + pointsChange, createdAt, System.currentTimeMillis());
     }
 
-    public UserStats withLoss() {
-        return new UserStats(userId, email, displayName, wins, losses + 1, draws, createdAt, System.currentTimeMillis());
+    public UserStats withLoss(int pointsChange) {
+        return new UserStats(userId, email, displayName, wins, losses + 1, draws, points - pointsChange, createdAt, System.currentTimeMillis());
     }
 
     public UserStats withDraw() {
-        return new UserStats(userId, email, displayName, wins, losses, draws + 1, createdAt, System.currentTimeMillis());
+        return new UserStats(userId, email, displayName, wins, losses, draws + 1, points, createdAt, System.currentTimeMillis());
     }
 
     public UserStats withDisplayName(String newName) {
-        return new UserStats(userId, email, newName, wins, losses, draws, createdAt, System.currentTimeMillis());
+        return new UserStats(userId, email, newName, wins, losses, draws, points, createdAt, System.currentTimeMillis());
     }
 
     public double getWinRate() {
@@ -79,6 +84,6 @@ public class UserStats {
 
     @Override
     public String toString() {
-        return String.format("%s: %dW-%dL-%dD (%.1f%%)", displayName, wins, losses, draws, getWinRate());
+        return String.format("%s: %dW-%dL-%dD (%.1f%%) | Points: %d", displayName, wins, losses, draws, getWinRate(), points);
     }
 }
