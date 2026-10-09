@@ -1,4 +1,0 @@
-void main() {
-	string s = "hello";
-	print("asc: " + character_to_ascii(s[0]));
-}

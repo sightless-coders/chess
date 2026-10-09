@@ -1,7 +1,0 @@
-void main() {
-	print("timer: " + timer().elapsed);
-	
-	// Try system time functions
-	int t = int(timer().elapsed * 1000);
-	print("ms since start: " + t);
-}
