@@ -1,0 +1,47 @@
+Chess — you can do everything with it.
+
+Copyright (c) 2026 sightless-coders
+
+You can do everything with this software. Host it. Break it. Fix it. Improve
+it. Rip it apart. Rename it. Sell it. Give it away. Bundle it with something
+else. Port it. Translate it. Make something entirely new out of it. Run it on
+a potato. No permission needed, no forms to fill in, no strings attached, no
+credit required — though a nod is always welcome.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to no conditions at all.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Third-party code, and it matters:
+
+Everything this license covers is this project's own code. The libraries
+vendored in vendor/ are not ours to relicense, and they stay under the terms
+they were published under:
+
+  vendor/blindpro-window-gui   GPLv3 (blindpro)
+  vendor/NVGT-Helpers          GPLv3 (blindpro)
+  vendor/nv-test               GPLv3 (samtupy)
+
+They are compiled into the Windows build, so distributing windows/chess.exe
+means distributing GPL-covered code: anyone you give the binary to is entitled
+to its source under the same terms, and you may not put a proprietary licence
+on that combination. The sound effects in windows/sounds/ui/ and the code in
+this repository outside vendor/ are ours and are covered by the do-whatever
+you want licence above.
+
+NVGT, the compiler and runtime the Windows version is built with, is separate
+software with its own licence, as are its plugins such as voice_command.dll.
+Check their terms before shipping anything.

@@ -1,0 +1,98 @@
+//helper for the voice_command plugin
+#pragma plugin voice_command
+class voice_command_helper
+{
+bool active;
+string last_cmd;
+bool started = false;
+voice_recognizer v;
+//constructer. Active refers to is the voice recognizer working how it should, hwile started refers to is the voice recognizer currently looking for speech.
+voice_command_helper()
+{
+active = v.setup();
+if(active == true)
+{
+v.start();
+started = true;
+}
+}
+//call this every frame if you want, it will refresh last_cmd with the latest command.
+void update()
+{
+last_cmd = v.get_command();
+}
+bool add_phrays(string phrays)
+{
+string new_phrays;
+if(phrays.find("*") != -1)
+{
+new_phrays = phrays.replace("*","");
+return v.add_command(new_phrays);
+}
+return v.add_command(phrays);
+}
+//prefix is if you want a phrays to have to be spoken before dictation, such as type "***" to dictate. The user will have to say this prefix before dictation begins. You can leave this blank if you wish.
+bool add_dictation(string prefix)
+{
+return v.add_command(prefix+" *");
+}
+void clear_all()
+{
+v.clear_commands();
+}
+bool start()
+{
+if(started == false)
+{
+v.start();
+started=  true;
+return true;
+}
+else
+{
+return false;
+}
+}
+bool stop()
+{
+if(started == true)
+{
+v.stop();
+started = false;
+return true;
+}
+else
+{
+return false;
+}
+}
+bool get_active()
+{
+return active;
+}
+bool get_started()
+{
+return started;
+}
+int waiting_commands()
+{
+return v.get_commands_pending();
+}
+//You can choose to use this instead of last_cmd
+string get_last_command()
+{
+return v.get_command();
+}
+void clear_waiting_commands()
+{
+v.clear_queue();
+}
+int get_error_countt()
+{
+return v.get_error_count();
+}
+void reset_errors()
+{
+v.reset_error_count();
+}
+}

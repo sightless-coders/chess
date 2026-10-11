@@ -1,0 +1,14 @@
+#pragma plugin nvgt_app_volume
+void handle_volume()
+{
+if(key_pressed(KEY_HOME))
+{
+sys_audio_set_app_volume(sys_audio_get_app_volume()+0.1);
+speak("volume up");
+}
+if(key_pressed(KEY_END))
+{
+sys_audio_set_app_volume(sys_audio_get_app_volume()-0.1);
+speak("volume down");
+}
+}

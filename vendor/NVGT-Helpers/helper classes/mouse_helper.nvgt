@@ -1,0 +1,189 @@
+//enum for mouse buttons
+enum mouse_button
+{
+MOUSE_LEFT   = 1,
+MOUSE_RIGHT  = 3,
+MOUSE_MIDDLE = 2,
+MOUSE_FORWARD = 5,
+MOUSE_BACK = 4
+}
+class mouse
+{
+float x;
+float y;
+float z;
+float x2;
+float y2;
+float z2;
+float last_x;
+float last_y;
+float last_z;
+bool hasMouse;
+//Constructer. This will set hasMouse to true or false depending on if there is one plugged in or not.
+mouse()
+{
+hasMouse = get_MOUSE_AVAILABLE();
+}
+mouse(bool fullscreen)
+{
+hasMouse = get_MOUSE_AVAILABLE();
+set_mouse_grab(fullscreen);
+}
+//Function to check if there is a mouse or not.
+bool has_mouse()
+{
+return hasMouse;
+}
+//Call this every frame. This updates the mouse along with the class.
+void update()
+{
+last_x = MOUSE_ABSOLUTE_X;
+last_y = MOUSE_ABSOLUTE_Y;
+last_z = MOUSE_ABSOLUTE_Z;
+mouse_update();
+x = MOUSE_X;
+y = MOUSE_Y;
+z = MOUSE_Z;
+x2 = MOUSE_ABSOLUTE_X;
+y2 = MOUSE_ABSOLUTE_Y;
+z2 = MOUSE_ABSOLUTE_Z;
+}
+//This changes if the mouse can go outside the window or not.
+void full_screen(bool fullscreen)
+{
+set_mouse_grab(fullscreen);
+}
+//These return the x, y, and scroll of the mouse.
+float get_x()
+{
+return x;
+}
+float get_y()
+{
+return y;
+}
+float get_scrol()
+{
+return z;
+}
+float get_abs_x()
+{
+return x2;
+}
+float get_abs_y()
+{
+return y2;
+}
+float get_abs_z()
+{
+return z2;
+}
+//These are to check for mouse input, using the mouseButton enum.
+bool pressed(int key)
+{
+return mouse_pressed(key);
+}
+bool down(int key)
+{
+return mouse_down(key);
+}
+bool up(int key)
+{
+return mouse_up(key);
+}
+bool released(int key)
+{
+return mouse_released(key);
+}
+//These functions will return movement as a string.
+string get_x_movement()
+{
+if(x<0)
+{
+return "left";
+}
+else if(x>0)
+{
+return "right";
+}
+else
+{
+return "center";
+}
+}
+string get_x_movement_abs()
+{
+if(x2>last_x)
+{
+return "right";
+}
+else if(x2<last_x)
+{
+return "left";
+}
+else
+{
+return "center";
+}
+}
+string get_y_movement()
+{
+if(y>0)
+{
+return "down";
+}
+else if(y<0)
+{
+return "up";
+}
+else
+{
+return "center";
+}
+}
+string get_y_movement_abs()
+{
+if(y2<last_y)
+{
+return "down";
+}
+else if(y2>last_y)
+{
+return "up";
+}
+else
+{
+return "center";
+}
+}
+string get_scrol_movement()
+{
+if(z>0)
+{
+return "up";
+}
+else if(z<0)
+{
+return "down";
+}
+else
+{
+return "center";
+}
+}
+string get_scrol_movement_abs()
+{
+if(z2>last_z)
+{
+return "up";
+}
+else if(z2<last_z)
+{
+return "down";
+}
+else
+{
+return "center";
+}
+}
+}

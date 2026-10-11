@@ -12,8 +12,11 @@
 //
 // Main menu:
 //   Play against the computer / Two players on this keyboard /
-//   Host an online game / Join an online game / How to play /
+//   Host an online game / Join an online game / Settings / How to play /
 //   Switch voice mode / Quit
+// The Settings dialog is built with blindpro's window_gui library (vendored in
+// vendor/blindpro-window-gui), which layers named buttons, checkboxes and
+// sliders over NVGT's audio form.
 //
 // In-game controls (cursor moves over the board):
 //   Arrows            one square up, down, left or right
@@ -26,6 +29,7 @@
 //   L                 hear every move played so far
 //   M                 back to the main menu
 //   C                 chat message (online games)
+//   V                 turn voice-command input on and off
 //   R                 resign (press twice)
 //   Escape            press twice to quit
 //
@@ -33,17 +37,36 @@
 // "Black plays e5", "White plays bishop c5" ... and every match announces
 // itself when it starts. Blind mode also narrates the square under the
 // cursor; sighted mode prints the board to the console after every change.
+//
+// Voice commands use NVGT's voice_command plugin (vendored in
+// vendor/NVGT-Helpers). Press V in a match, then say a square such as "e4" to
+// move the cursor, "select" to pick up or play a piece, or "undo", "new",
+// "moves", "menu", "help", "resign", "draw", "accept", "reject", "chat" or
+// "time". When no speech recognizer is available the game says so and the
+// keyboard keeps working exactly as before.
 
 #include "speech.nvgt"
 #include "menu.nvgt"
 #include "input_forms.nvgt"
 #include "chess_core.nvgt"
 #include "accounts.nvgt"
+#include "../vendor/blindpro-window-gui/window_gui/window_gui.nvgt"
+#include "../vendor/NVGT-Helpers/helper classes/voice_commands_helper.nvgt"
 
 #pragma asset "sounds/logo.ogg"
 #pragma asset "sounds/ui/click.wav"
+#pragma asset "sounds/ui/select.wav"
 #pragma asset "sounds/ui/move.wav"
+#pragma asset "sounds/ui/capture.wav"
+#pragma asset "sounds/ui/castle.wav"
+#pragma asset "sounds/ui/promote.wav"
+#pragma asset "sounds/ui/check.wav"
+#pragma asset "sounds/ui/start.wav"
+#pragma asset "sounds/ui/win.wav"
+#pragma asset "sounds/ui/lose.wav"
+#pragma asset "sounds/ui/draw.wav"
 #pragma asset "sounds/ui/error.wav"
+#pragma asset "sounds/ui/flag.wav"
 
 const string PROMPT = "Welcome to Chess. Are you blind or not? "
 	+ "If you are blind, press enter twice. "
@@ -59,6 +82,8 @@ const string CONTROLS_HELP = "How to play. The arrow keys move the cursor over t
 	+ "m to return to the main menu, r twice to resign, and escape twice to quit. "
 	+ "Online: one player hosts a game and the other joins with the host's address. "
 	+ "Press c to chat during an online game. "
+	+ "Press v to turn voice commands on or off. Then say a square such as e4 to move the cursor over the board, "
+	+ "say select to pick up or play a piece, or say undo, new, moves, menu, help, resign, draw or time. "
 	+ "Moves are spoken as: White plays e4, Black plays e5, White plays bishop c5.";
 
 const int CHESS_PORT = 47772; // online play: host listens here, joiners connect here
@@ -66,8 +91,18 @@ const uint8 NET_CH = 0;
 
 sound s_logo;
 sound s_click;
+sound s_select;
 sound s_move;
+sound s_capture;
+sound s_castle;
+sound s_promote;
+sound s_check;
+sound s_start;
+sound s_win;
+sound s_lose;
+sound s_draw;
 sound s_error;
+sound s_flag;
 
 bool mode_chosen = false;
 bool blind_mode = true;
@@ -107,6 +142,21 @@ bool draw_offered = false; // Whether a draw has been offered
 bool draw_offered_by_white = false; // Who offered the draw
 bool draw_offer_pending = false; // Whether draw offer is waiting for response
 
+// Voice-command input (NVGT's voice_command plugin, vendored in vendor/NVGT-Helpers).
+voice_command_helper@ voice = null;
+bool voice_wanted = false;
+string voice_last_cmd = "";
+const int VOICE_REPEAT_MS = 1500; // how long a spoken phrase is ignored after it fires
+timer voice_last_cmd_at;
+bool voice_menu_flag = false; // set by "menu", read by the game loop
+
+// Settings dialog (window_gui) state and the values it edits.
+bool narrate_cursor = true; // narrate the square under the cursor
+bool settings_ok = false;
+bool settings_cancel = false;
+int settings_rate_applied = 0; // the rate last handed to NVGT's voice; 0 is neutral
+int settings_volume_applied = 0; // 0 means never set, so leave the OS/voice default alone
+
 // ------------------------------------------------------------- speech ------
 void set_status(string t, bool interrupt = true) {
 	status_text = t;
@@ -115,7 +165,7 @@ void set_status(string t, bool interrupt = true) {
 }
 
 void announce(string t) {
-	if (mode_chosen && blind_mode) speak(t);
+	if (mode_chosen && narrate_cursor) speak(t);
 }
 
 void skip_logo() {
@@ -224,7 +274,12 @@ void apply_move(move_t@ m, bool from_net = false) {
 	board_make(m);
 	history.insert_last(m);
 	selected = -1;
-	s_move.play();
+	// Chess-like cues: a light clack for a move, a harder two-part clack for
+	// a capture, two clacks for castling and a rising chime for promotion.
+	if ((m.flags & (MOVE_CK | MOVE_CQ)) != 0) s_castle.play();
+	else if (m.captured != 0) s_capture.play();
+	else if (m.promo != 0) s_promote.play();
+	else s_move.play();
 	rebuild_move_log();
 
 	string played = move_play_text(m);
@@ -239,10 +294,15 @@ void apply_move(move_t@ m, bool from_net = false) {
 
 	legal_moves(false);
 	bool has_moves = gen_pool.length() > 0;
+	if (in_check(white_to_move)) s_check.play(); // check gets its own alert tone
 	if (!has_moves) {
 		game_over = true;
 		clock_running = false;
 		if (in_check(white_to_move)) {
+			// The mover delivered checkmate: win/lose jingle by who won.
+			if (!vs_computer && !online_mode) s_win.play(); // local: someone won
+			else if (vs_computer) { if (mover_white) s_win.play(); else s_lose.play(); }
+			else { if ((online_is_host && mover_white) || (!online_is_host && !mover_white)) s_win.play(); else s_lose.play(); }
 			string winner = mover_white ? "White" : "Black";
 			string loser = mover_white ? "Black" : "White";
 			set_status(loser + " is checkmated. "
@@ -264,17 +324,20 @@ void apply_move(move_t@ m, bool from_net = false) {
 				}
 			}
 		} else {
+			s_draw.play();
 			set_status("Stalemate, a draw. Press N for a new game or M for the main menu.", false);
 			if (vs_computer || online_mode) record_game_result("draw");
 		}
 	} else if (insufficient_material()) {
 		game_over = true;
 		clock_running = false;
+		s_draw.play();
 		set_status("Draw, insufficient material. Press N for a new game or M for the main menu.", false);
 		if (vs_computer || online_mode) record_game_result("draw");
 	} else if (halfmove_clock >= 100) {
 		game_over = true;
 		clock_running = false;
+		s_draw.play();
 		set_status("Draw by the 50-move rule. Press N for a new game or M for the main menu.", false);
 		if (vs_computer || online_mode) record_game_result("draw");
 	} else {
@@ -292,6 +355,12 @@ void handle_flag_fall(bool flagged_player_white) {
 	clock_running = false;
 	string flagged = flagged_player_white ? "White" : "Black";
 	string winner = flagged_player_white ? "Black" : "White";
+	s_flag.play();
+	if (vs_computer) { if (winner == "White") s_win.play(); else s_lose.play(); }
+	else if (online_mode) {
+		if ((online_is_host && winner == "White") || (!online_is_host && winner == "Black")) s_win.play();
+		else s_lose.play();
+	} else s_win.play();
 	set_status(flagged + " flag falls. " + winner + " wins on time. "
 			+ "Press N for a new game or M for the main menu.", false);
 	if (online_mode) {
@@ -325,7 +394,7 @@ void handle_enter() {
 		int p = sq[cursor];
 		if (p != 0 && piece_is_white(p) == white_to_move) {
 			selected = cursor;
-			s_click.play();
+			s_select.play();
 			legal_moves(false);
 			int count = 0;
 			for (uint i = 0; i < gen_pool.length(); i++) {
@@ -373,6 +442,12 @@ move_t@ wait_promotion(move_t@ sample) {
 		if (key_pressed(KEY_2)) { want = P_ROOK; break; }
 		if (key_pressed(KEY_3)) { want = P_BISHOP; break; }
 		if (key_pressed(KEY_4)) { want = P_KNIGHT; break; }
+		// With voice commands on, the piece may simply be named.
+		string spoken = voice_poll();
+		if (spoken == "queen") { want = P_QUEEN; break; }
+		if (spoken == "rook") { want = P_ROOK; break; }
+		if (spoken == "bishop") { want = P_BISHOP; break; }
+		if (spoken == "knight") { want = P_KNIGHT; break; }
 	}
 	legal_moves(false);
 	for (uint i = 0; i < gen_pool.length(); i++) {
@@ -413,15 +488,18 @@ void do_resign() {
 	selected = -1;
 	if (online_mode) {
 		net_send("RESIGN");
+		s_lose.play(); // you resigned
 		set_status("You resigned. " + (online_is_host ? "Black" : "White") + " wins the match. "
 				+ "Press M for the main menu.");
 		// Record loss for resigning player
 		record_game_result("loss");
 	} else if (vs_computer) {
+		s_lose.play();
 		set_status("You resigned. The computer wins the match. "
 				+ "Press N for a new game or M for the main menu.");
 		record_game_result("loss");
 	} else {
+		s_win.play();
 		string resigner = white_to_move ? "White" : "Black";
 		string winner = white_to_move ? "Black" : "White";
 		set_status(resigner + " resigned. " + winner + " wins the match. "
@@ -432,6 +510,7 @@ void do_resign() {
 
 void start_match() {
 	board_reset();
+	s_start.play(); // a match begins with its own chime
 	history.resize(0);
 	rebuild_move_log();
 	game_over = false;
@@ -777,6 +856,7 @@ void handle_net_message(string msg) {
 		if (game_over) return;
 		game_over = true;
 		selected = -1;
+		s_win.play();
 		set_status("Your opponent resigned. You win the match. Press M for the main menu.", true);
 		print_board();
 	} else if (msg.substr(0, 9) == "DRAW_OFFER") {
@@ -796,6 +876,7 @@ void handle_net_message(string msg) {
 		game_over = true;
 		draw_offer_pending = false;
 		draw_offered = false;
+		s_draw.play();
 		set_status("Draw accepted. The game is a draw. Press M for the main menu.", true);
 		if (!logged_in_user.empty() && !logged_in_user.starts_with("Guest_")) {
 			auth.record_result(logged_in_user, "draw", 0);
@@ -948,6 +1029,227 @@ void handle_chat() {
 	net_send("MSG|" + text);
 }
 
+// Offers a draw, accepts the offer waiting on the player, or rejects it when
+// reject is true. Shared by the D key and by voice commands.
+void handle_draw(bool reject) {
+	if (!online_mode && vs_computer) {
+		speak("Draw offers only available in multiplayer games.", true);
+		return;
+	}
+	if (reject) {
+		if (!draw_offer_pending) {
+			speak("No draw offer to reject.", true);
+			return;
+		}
+		draw_offer_pending = false;
+		draw_offered = false;
+		if (online_mode) net_send(net_draw_reject_msg());
+		speak("Draw offer rejected.", true);
+		return;
+	}
+	if (draw_offer_pending) {
+		game_over = true;
+		draw_offer_pending = false;
+		draw_offered = false;
+		if (online_mode) net_send(net_draw_accept_msg());
+		s_draw.play();
+		set_status("Draw accepted. The game is a draw. Press M for the main menu.", true);
+		if (!logged_in_user.empty() && !logged_in_user.starts_with("Guest_")) {
+			auth.record_result(logged_in_user, "draw", 0);
+		}
+		print_board();
+		return;
+	}
+	if (game_over) return;
+	draw_offered = true;
+	draw_offered_by_white = white_to_move;
+	draw_offer_pending = true;
+	if (online_mode) net_send(net_draw_offer_msg());
+	speak("You offer a draw. Waiting for opponent...", true);
+}
+
+// -------------------------------------------------------- voice commands ----
+// Hands-free play through NVGT's voice_command plugin (vendored in
+// vendor/NVGT-Helpers). Press V in a match to toggle it. When the plugin has
+// no speech engine to talk to, voice_enable() says so and the keyboard keeps
+// working exactly as before.
+bool voice_enable() {
+	if (@voice != null) {
+		if (!voice.get_started()) voice.start();
+		voice_wanted = true;
+		return true;
+	}
+	voice_command_helper@ helper = null;
+	try {
+		@helper = voice_command_helper();
+	} catch {
+		@helper = null;
+	}
+	if (@helper == null || !helper.get_active()) {
+		@voice = null;
+		voice_wanted = false;
+		speak("Voice commands are not available: no speech recognizer was found on this computer.", true);
+		return false;
+	}
+	@voice = helper;
+	voice.clear_all();
+	int registered = 0;
+	// Every square, spoken the way it is written: "e4", "a8".
+	for (int fl = 0; fl < 8; fl++) {
+		for (int rank = 1; rank <= 8; rank++) {
+			if (voice.add_phrays("abcdefgh".substr(fl, 1) + rank)) registered++;
+		}
+	}
+	// Game commands.
+	string[] commands;
+	commands.insert_last("select");
+	commands.insert_last("undo");
+	commands.insert_last("new");
+	commands.insert_last("moves");
+	commands.insert_last("menu");
+	commands.insert_last("help");
+	commands.insert_last("resign");
+	commands.insert_last("draw");
+	commands.insert_last("accept");
+	commands.insert_last("reject");
+	commands.insert_last("chat");
+	commands.insert_last("time");
+	commands.insert_last("queen");
+	commands.insert_last("rook");
+	commands.insert_last("bishop");
+	commands.insert_last("knight");
+	for (uint i = 0; i < commands.length(); i++) {
+		if (voice.add_phrays(commands[i])) registered++;
+	}
+	voice.start();
+	voice_last_cmd = "";
+	voice_wanted = true;
+	print("[voice] registered " + registered + " phrases\n");
+	speak("Voice commands on. Say a square such as e4 to move the cursor over the board, "
+		+ "say select to pick up or play a piece, or say undo, new, moves, menu, help, "
+		+ "resign, draw or time. Press V to turn voice commands off.", true);
+	return true;
+}
+
+void voice_disable() {
+	if (@voice != null) voice.stop();
+	voice_wanted = false;
+	voice_last_cmd = "";
+}
+
+void voice_toggle() {
+	if (voice_wanted) {
+		voice_disable();
+		speak("Voice commands off.", true);
+	} else {
+		voice_enable();
+	}
+}
+
+// Returns the next spoken command. A phrase is only acted on once until it is
+// repeated after a short pause, because the plugin keeps reporting the last
+// thing it heard until something else arrives.
+string voice_poll() {
+	if (@voice == null || !voice_wanted) return "";
+	voice.update();
+	string cmd = voice.last_cmd;
+	if (cmd.empty()) return "";
+	if (cmd == voice_last_cmd && voice_last_cmd_at.elapsed < VOICE_REPEAT_MS) return "";
+	voice_last_cmd = cmd;
+	voice_last_cmd_at.restart();
+	return cmd;
+}
+
+void voice_handle_command(const string&in cmd) {
+	// Square names move the cursor; with a piece picked up and that square
+	// being a legal destination they play the move, so "e2" then "e4" is a
+	// complete turn without touching the keyboard.
+	int target = square_index(cmd);
+	if (target >= 0) {
+		if (selected >= 0) {
+			legal_moves(false);
+			for (uint i = 0; i < gen_pool.length(); i++) {
+				if (gen_pool[i].from == selected && gen_pool[i].to == target) {
+					cursor = target;
+					handle_enter();
+					return;
+				}
+			}
+		}
+		cursor = target;
+		announce(square_desc(cursor));
+		return;
+	}
+	if (cmd == "select") handle_enter();
+	else if (cmd == "undo") do_undo();
+	else if (cmd == "new") prompt_new_game();
+	else if (cmd == "menu") voice_menu_flag = true;
+	else if (cmd == "help") speak(CONTROLS_HELP, true);
+	else if (cmd == "moves") {
+		if (move_log == "") speak("No moves have been played yet.", true);
+		else speak("Move list. " + move_log, true);
+	} else if (cmd == "resign") do_resign();
+	else if (cmd == "draw" || cmd == "accept") handle_draw(false);
+	else if (cmd == "reject") handle_draw(true);
+	else if (cmd == "chat") handle_chat();
+	else if (cmd == "time") {
+		if (clock_enabled) speak("Your time: " + format_time(white_to_move ? white_time_ms : black_time_ms), true);
+		else speak("Clock is not enabled.", true);
+	}
+}
+
+// ------------------------------------------------------------- settings -----
+// window_gui fires button callbacks from inside its own run loop, so the
+// dialog waits on these two flags instead of polling the buttons (which would
+// consume a press before the dialog saw it).
+void settings_ok_action() { settings_ok = true; }
+void settings_cancel_action() { settings_cancel = true; }
+
+void apply_settings(bool narrate, bool voice_on, int rate, int volume) {
+	narrate_cursor = narrate;
+	if (rate != settings_rate_applied) {
+		tts.set_rate(rate);
+		settings_rate_applied = rate;
+	}
+	// tts.get_volume() reports 0 on machines using the OS default, so only
+	// touch the volume when the player actually moved the slider.
+	if (volume > 0 && volume != settings_volume_applied) {
+		tts.set_volume(volume);
+		settings_volume_applied = volume;
+	}
+	if (voice_on && !voice_wanted) voice_enable();
+	else if (!voice_on && voice_wanted) voice_disable();
+}
+
+// A dialog of checkboxes, sliders and buttons built with blindpro's window_gui.
+void show_settings() {
+	settings_ok = false;
+	settings_cancel = false;
+	window_gui wg;
+	wg.setup_window("Settings");
+	wg.create_checkbox("Narrate the square under the cursor", narrate_cursor);
+	wg.create_checkbox("Voice command input", voice_wanted);
+	wg.create_slider("Voice rate", settings_rate_applied, -10, 10, "offset from the normal speaking rate", 1);
+	wg.create_slider("Voice volume", settings_volume_applied > 0 ? settings_volume_applied : 100, 1, 100, "percent", 5);
+	wg.create_button("OK", settings_ok_action, true, false);
+	wg.create_button("Cancel", settings_cancel_action, false, true);
+	wg.focus("Narrate the square under the cursor");
+	while (!settings_ok && !settings_cancel) {
+		wait(5);
+		wg.run();
+	}
+	if (settings_cancel) {
+		speak("Settings unchanged.", true);
+	} else {
+		apply_settings(wg.chect("Narrate the square under the cursor"),
+			wg.chect("Voice command input"),
+			int(wg.get_slider("Voice rate")),
+			int(wg.get_slider("Voice volume")));
+		speak("Settings saved.", true);
+	}
+	show_window("Chess"); // the dialog renames the window, so put the title back
+}
+
 // --------------------------------------------------------------- menu -------
 // Returns "play" when a match should start or "quit" when the game should exit.
 string show_main_menu() {
@@ -969,12 +1271,14 @@ string show_main_menu() {
 	}
 	m.add_item("Host an online game", "host");
 	m.add_item("Join an online game", "join");
+	m.add_item("Settings", "settings");
 	if (logged_in_user.empty()) {
 		speak("Please sign in to play command line mode.", true);
 	} else {
 		m.add_item("Command line mode (50 pts)", "cmdline");
 	}
 	m.add_item("How to play", "help");
+	m.add_item("Visit sightless-coders website", "website");
 	m.add_item(blind_mode ? "Switch to sighted mode" : "Switch to blind mode", "mode");
 	m.add_item("Quit", "quit");
 	bool esc_armed = false;
@@ -996,7 +1300,13 @@ string show_main_menu() {
 		if (id == "quit") return "quit";
 		if (id == "mode") {
 			blind_mode = !blind_mode;
-			m.set_item_text(5, blind_mode ? "Switch to sighted mode" : "Switch to blind mode");
+			narrate_cursor = blind_mode;
+			m.set_item_text(m.get_item_index("mode"), blind_mode ? "Switch to sighted mode" : "Switch to blind mode");
+			m.automatic_intro = true;
+			continue;
+		}
+		if (id == "settings") {
+			show_settings();
 			m.automatic_intro = true;
 			continue;
 		}
@@ -1004,16 +1314,21 @@ string show_main_menu() {
 			speak(CONTROLS_HELP, true);
 			continue;
 		}
+		if (id == "website") {
+			urlopen("http://sightless-coders.duckdns.org:1030");
+			speak("Opening sightless-coders website.", true);
+			continue;
+		}
 		if (id == "account") {
 			if (logged_in_user.empty()) {
 				show_login_menu(auth, logged_in_user);
 				if (!logged_in_user.empty()) {
-					m.set_item_text(2, "Account: " + logged_in_user);
+					m.set_item_text(m.get_item_index("account"), "Account: " + logged_in_user);
 				}
 			} else {
 				show_account_menu(auth, logged_in_user);
 				if (logged_in_user.empty()) {
-					m.set_item_text(2, "Account");
+					m.set_item_text(m.get_item_index("account"), "Account");
 				}
 			}
 			m.automatic_intro = true;
@@ -1360,47 +1675,10 @@ bool game_loop() {
 		}
 		if (key_pressed(KEY_M)) to_menu = true;
 		if (key_pressed(KEY_C)) handle_chat();
+		if (key_pressed(KEY_V)) voice_toggle();
 
 		// D key: offer draw / accept draw offer, Shift+D: reject draw offer
-		if (key_pressed(KEY_D)) {
-			if (online_mode || !vs_computer) {
-				bool shift = shift_held();
-				if (shift) {
-					// Reject draw offer
-					if (draw_offer_pending) {
-						draw_offer_pending = false;
-						draw_offered = false;
-						if (online_mode) net_send(net_draw_reject_msg());
-						speak("Draw offer rejected.", true);
-					} else {
-						speak("No draw offer to reject.", true);
-					}
-				} else {
-					// Offer or accept draw
-					if (draw_offer_pending) {
-						// Accept draw offer
-						game_over = true;
-						draw_offer_pending = false;
-						draw_offered = false;
-						if (online_mode) net_send(net_draw_accept_msg());
-						set_status("Draw accepted. The game is a draw. Press M for the main menu.", true);
-						if (!logged_in_user.empty() && !logged_in_user.starts_with("Guest_")) {
-							auth.record_result(logged_in_user, "draw", 0);
-						}
-						print_board();
-					} else if (!game_over) {
-						// Offer draw
-						draw_offered = true;
-						draw_offered_by_white = white_to_move;
-						draw_offer_pending = true;
-						if (online_mode) net_send(net_draw_offer_msg());
-						speak("You offer a draw. Waiting for opponent...", true);
-					}
-				}
-			} else {
-				speak("Draw offers only available in multiplayer games.", true);
-			}
-		}
+		if (key_pressed(KEY_D)) handle_draw(shift_held());
 
 		// T key: check your time, Shift+T: check opponent's time
 		if (key_pressed(KEY_T)) {
@@ -1435,6 +1713,16 @@ bool game_loop() {
 			resign_armed = false;
 		}
 
+		// Voice commands: hands-free cursor movement and game actions.
+		if (voice_wanted) {
+			string vcmd = voice_poll();
+			if (!vcmd.empty()) voice_handle_command(vcmd);
+			if (voice_menu_flag) {
+				voice_menu_flag = false;
+				to_menu = true;
+			}
+		}
+
 		if (key_pressed(KEY_ESCAPE)) {
 			if (esc_armed && esc_t.elapsed < 1500) quit_app = true;
 			else {
@@ -1455,6 +1743,7 @@ void choose_mode(bool blind) {
 	if (mode_chosen) return;
 	mode_chosen = true;
 	blind_mode = blind;
+	narrate_cursor = blind;
 	s_logo.stop();
 	logo_playing = false;
 	s_click.play();
@@ -1473,8 +1762,18 @@ int main() {
 		logo_playing = true;
 	} else print("warning: could not load sounds/logo.ogg");
 	s_click.load("sounds/ui/click.wav");
+	s_select.load("sounds/ui/select.wav");
 	s_move.load("sounds/ui/move.wav");
+	s_capture.load("sounds/ui/capture.wav");
+	s_castle.load("sounds/ui/castle.wav");
+	s_promote.load("sounds/ui/promote.wav");
+	s_check.load("sounds/ui/check.wav");
+	s_start.load("sounds/ui/start.wav");
+	s_win.load("sounds/ui/win.wav");
+	s_lose.load("sounds/ui/lose.wav");
+	s_draw.load("sounds/ui/draw.wav");
 	s_error.load("sounds/ui/error.wav");
+	s_flag.load("sounds/ui/flag.wav");
 
 	// Let the logo start, then ask the question.
 	wait(1200);

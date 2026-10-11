@@ -1,0 +1,94 @@
+#include"test.nvgt"
+funcdef bool test_func();
+class nv_tester
+{
+test[] tests;
+int amount = 0;
+int passed = 0;
+int failed = 0;
+string filename;
+nv_tester(string filename = "test_log.log")
+{
+this.filename = filename;
+}
+void clear_log()
+{
+file_put_contents(filename,"");
+}
+// Appends a line to the log. Upstream overwrote the file on every call, so
+// only the last line survived; appending is what a test log is for.
+void write_log(string message)
+{
+file_put_contents(filename,message+"\n",true);
+}
+void add_test(string title,test_func@ callback,string error_message)
+{
+test t(title,callback,error_message);
+tests.insert_last(t);
+amount++;
+}
+// Runs the tests in order and stops at the first failure.
+bool run_until_fail()
+{
+for(int i = 0; i<tests.length(); i++)
+{
+test@ t = tests[i];
+bool result = false;
+try
+{
+result = t.run();
+}
+catch
+{
+write_log("EXCEPTION in "+t.title+": "+get_exception_info());
+failed++;
+return false;
+}
+if(!result)
+{
+write_log("FAIL "+t.title+": "+t.error_message);
+failed++;
+return false;
+}
+}
+return true;
+}
+// Runs every test, prints one line per test, appends a summary to the log and
+// returns the number of failures so a build script can use it as an exit code.
+int run_tests()
+{
+passed = 0;
+failed = 0;
+clear_log();
+write_log("running test suite. "+amount+" tests.");
+for(int i = 0; i<tests.length(); i++)
+{
+test@ t = tests[i];
+bool result = false;
+try
+{
+result = t.run();
+}
+catch
+{
+write_log("EXCEPTION in "+t.title+": "+get_exception_info());
+result = false;
+}
+if(result)
+{
+passed++;
+print("PASS  "+t.title+"\n");
+}
+else
+{
+failed++;
+print("FAIL  "+t.title+": "+t.error_message+"\n");
+}
+write_log("test "+i+" ("+t.title+"): "+(result ? "pass" : "fail"));
+}
+string summary = amount+" tests. "+passed+" passed, "+failed+" failed.";
+write_log(summary);
+print(summary+"\n");
+return failed;
+}
+}

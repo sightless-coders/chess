@@ -1,0 +1,22 @@
+class test
+{
+string title;
+string error_message;
+test_func@ callback;
+test(string title ,test_func@ func, string error_message)
+{
+this.title = title;
+@callback = @func;
+this.error_message = error_message;
+}
+test()
+{
+this.title = "none";
+@callback = null;
+this.error_message = "invalid test.";
+}
+bool run()
+{
+return callback();
+}
+}

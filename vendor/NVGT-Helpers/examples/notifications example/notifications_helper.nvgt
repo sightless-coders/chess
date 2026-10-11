@@ -1,0 +1,80 @@
+//helper class for the notifications plugin
+#pragma plugin notifications
+class notifications_helper
+{
+uint64 handle;
+toast_notifier n;
+int id;
+tray_icon t;
+string last_action;
+string name;
+bool clicked = false;
+int selected_item;
+//constructer. This will allow you to set some of the properties of the class. You will have to call set_id to set the ID after creating the object.
+notifications_helper(int i, string n)
+{
+name = n;
+id = i;
+handle = get_window_os_handle();
+}
+//Call this every frame if you want it. It will allow you to get the last action, button, or menu item selected from the properties of the class.
+void update() 
+{
+last_action = n.get_action();
+clicked = t.is_clicked();
+selected_item = t.get_menu_click();
+}
+bool show(string title, string boddie)
+{
+return n.show(title,boddie);
+}
+bool show(string title, string boddie, string buttons, string actions)
+{
+return n.show(title,boddie,buttons,actions);
+}
+bool create_shortcut()
+{
+return n.install_shortcut(name,id);
+}
+//You can choose either for the class to use the name propertie, or to set the name. That is why there are 2 functions here.
+bool add_to_tray()
+{
+return t.add(name);
+}
+bool add_to_tray(string name)
+{
+return t.add(name);
+}
+void set_id()
+{
+n.set_app_id(id);
+}
+void remove_from_tray()
+{
+t.remove();
+}
+void set_tray_name(string name)
+{
+t.set_tooltip(name);
+}
+void set_tray_items(string items)
+{
+t.set_menu_items(items);
+}
+void hide_window()
+{
+t.hide_window(handle);
+}
+void show_window()
+{
+t.show_window(handle);
+}
+string get_selected_action()
+{
+return last_action;
+}
+int get_selected_item()
+{
+return selected_item;
+}
+}

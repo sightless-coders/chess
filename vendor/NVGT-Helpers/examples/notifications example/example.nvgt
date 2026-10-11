@@ -1,0 +1,7 @@
+#include"notifications_helper.nvgt"
+notifications_helper n;
+void main()
+{
+n.show("test","This is a test of notifications!");
+exit();
+}

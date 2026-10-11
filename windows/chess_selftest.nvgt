@@ -1,19 +1,14 @@
 // chess_selftest.nvgt - Verifies the NVGT chess engine against the same known
-// counts the Android (Java) version is tested with. Exits 0 when everything
-// passes, 1 otherwise. Compiled and run by build_windows.bat.
+// counts the Android (Java) version is tested with. The suite is registered
+// with nv-test (vendored in ../vendor/nv-test), which prints one line per test,
+// writes chess_selftest.log and returns the failure count used as the exit
+// code. Exits 0 when everything passes, 1 otherwise. Compiled and run by
+// build_windows.bat.
 
 #include "chess_core.nvgt"
+#include "../vendor/nv-test/includes/nv_test.nvgt"
 
-int failures = 0;
-
-void expect(int got, int want, string label) {
-	if (got == want) {
-		print("PASS  " + label + ": " + got + "\n");
-	} else {
-		print("FAIL  " + label + ": got " + got + ", expected " + want + "\n");
-		failures++;
-	}
-}
+nv_tester tester("chess_selftest.log");
 
 int char_piece(string ch) {
 	int type = 0;
@@ -97,61 +92,7 @@ void setup_stalemate() {
 	white_to_move = false;
 }
 
-int main() {
-	core_init();
-
-	// Starting position.
-	board_reset();
-	expect(perft(1), 20, "start depth 1");
-	expect(perft(2), 400, "start depth 2");
-	expect(perft(3), 8902, "start depth 3");
-	expect(perft(4), 197281, "start depth 4");
-
-	// Kiwipete: exercises castling, pins and checks.
-	setup_kiwipete();
-	expect(perft(1), 48, "kiwipete depth 1");
-	expect(perft(2), 2039, "kiwipete depth 2");
-	expect(perft(3), 97862, "kiwipete depth 3");
-
-	// En passant position.
-	setup_en_passant();
-	expect(perft(1), 14, "en passant depth 1");
-	expect(perft(2), 191, "en passant depth 2");
-	expect(perft(3), 2812, "en passant depth 3");
-
-	// Checkmate detection (Black delivered scholar's mate).
-	setup_scholars_mate();
-	legal_moves(false);
-	expect(gen_pool.length() == 0 && in_check(true) ? 1 : 0, 1, "checkmate detected");
-
-	// Stalemate detection.
-	setup_stalemate();
-	legal_moves(false);
-	expect(gen_pool.length() == 0 && !in_check(false) ? 1 : 0, 1, "stalemate detected");
-
-	// AI returns a legal move from the start position.
-	board_reset();
-	try {
-		move_t@ m = ai_find_move(3, 2000);
-		if (@m == null) {
-			expect(0, 1, "AI returned a move");
-		} else {
-			bool found = false;
-			legal_moves(false);
-			for (uint i = 0; i < gen_pool.length(); i++) {
-				if (gen_pool[i].from == m.from && gen_pool[i].to == m.to && gen_pool[i].promo == m.promo) {
-					found = true;
-					break;
-				}
-			}
-			expect(found ? 1 : 0, 1, "AI move is legal (" + move_notation(m) + ")");
-		}
-	} catch {
-		print("EXCEPTION in AI test: " + get_exception_info() + "\n");
-		failures++;
-	}
-
-	// AI finds mate in one (scholar's mate position, White to move).
+void setup_mate_in_one() {
 	clear_for_fen();
 	setup_row(0, "r1bqkbnr");
 	setup_row(1, "pppp1ppp");
@@ -161,24 +102,97 @@ int main() {
 	setup_row(5, "5Q2");
 	setup_row(6, "PPPP1PPP");
 	setup_row(7, "RNBQKBNR");
+}
+
+// ------------------------------------------------------------- perft -------
+bool test_start_depth_1() { board_reset(); return perft(1) == 20; }
+bool test_start_depth_2() { board_reset(); return perft(2) == 400; }
+bool test_start_depth_3() { board_reset(); return perft(3) == 8902; }
+bool test_start_depth_4() { board_reset(); return perft(4) == 197281; }
+
+// Kiwipete exercises castling, pins and checks.
+bool test_kiwipete_depth_1() { setup_kiwipete(); return perft(1) == 48; }
+bool test_kiwipete_depth_2() { setup_kiwipete(); return perft(2) == 2039; }
+bool test_kiwipete_depth_3() { setup_kiwipete(); return perft(3) == 97862; }
+
+bool test_en_passant_depth_1() { setup_en_passant(); return perft(1) == 14; }
+bool test_en_passant_depth_2() { setup_en_passant(); return perft(2) == 191; }
+bool test_en_passant_depth_3() { setup_en_passant(); return perft(3) == 2812; }
+
+// ---------------------------------------------------------- game state -----
+// Black has delivered scholar's mate: White is checkmated.
+bool test_checkmate_detected() {
+	setup_scholars_mate();
+	legal_moves(false);
+	return gen_pool.length() == 0 && in_check(true);
+}
+
+bool test_stalemate_detected() {
+	setup_stalemate();
+	legal_moves(false);
+	return gen_pool.length() == 0 && !in_check(false);
+}
+
+// ---------------------------------------------------------------- AI -------
+// The AI must only ever offer a legal move.
+bool test_ai_returns_legal_move() {
+	board_reset();
+	move_t@ m = null;
+	try {
+		@m = ai_find_move(3, 2000);
+	} catch {
+		return false;
+	}
+	if (@m == null) return false;
+	legal_moves(false);
+	for (uint i = 0; i < gen_pool.length(); i++) {
+		if (gen_pool[i].from == m.from && gen_pool[i].to == m.to && gen_pool[i].promo == m.promo) return true;
+	}
+	return false;
+}
+
+// White to move with mate in one on the board.
+bool test_ai_finds_mate_in_one() {
+	setup_mate_in_one();
 	move_t@ finisher = null;
 	try {
 		@finisher = ai_find_move(3, 3000);
 	} catch {
-		print("EXCEPTION in mate-in-1 test: " + get_exception_info() + "\n");
-		failures++;
+		return false;
 	}
-	if (@finisher == null) {
-		expect(0, 1, "AI found mate in 1");
-	} else {
-		board_make(finisher);
-		legal_moves(false);
-		bool mates = gen_pool.length() == 0 && in_check(white_to_move);
-		board_unmake(finisher);
-		expect(mates ? 1 : 0, 1, "AI finds mate in 1 (" + move_notation(finisher) + ")");
-	}
+	if (@finisher == null) return false;
+	print("      mate found: " + move_notation(finisher) + "\n");
+	board_make(finisher);
+	legal_moves(false);
+	bool mates = gen_pool.length() == 0 && in_check(white_to_move);
+	board_unmake(finisher);
+	return mates;
+}
 
-	if (failures == 0) print("ALL TESTS PASSED");
-	else print(failures + " TEST(S) FAILED");
-	return failures > 0 ? 1 : 0;
+int main() {
+	core_init();
+
+	tester.add_test("starting position: perft depth 1", test_start_depth_1, "expected 20 legal moves");
+	tester.add_test("starting position: perft depth 2", test_start_depth_2, "expected 400 legal moves");
+	tester.add_test("starting position: perft depth 3", test_start_depth_3, "expected 8902 legal moves");
+	tester.add_test("starting position: perft depth 4", test_start_depth_4, "expected 197281 legal moves");
+
+	tester.add_test("kiwipete: perft depth 1", test_kiwipete_depth_1, "expected 48 legal moves");
+	tester.add_test("kiwipete: perft depth 2", test_kiwipete_depth_2, "expected 2039 legal moves");
+	tester.add_test("kiwipete: perft depth 3", test_kiwipete_depth_3, "expected 97862 legal moves");
+
+	tester.add_test("en passant: perft depth 1", test_en_passant_depth_1, "expected 14 legal moves");
+	tester.add_test("en passant: perft depth 2", test_en_passant_depth_2, "expected 191 legal moves");
+	tester.add_test("en passant: perft depth 3", test_en_passant_depth_3, "expected 2812 legal moves");
+
+	tester.add_test("checkmate detected", test_checkmate_detected, "no legal moves and the side to move is in check");
+	tester.add_test("stalemate detected", test_stalemate_detected, "no legal moves and the side to move is not in check");
+
+	tester.add_test("AI returns a legal move", test_ai_returns_legal_move, "the AI's move must exist in the legal move list");
+	tester.add_test("AI finds mate in 1", test_ai_finds_mate_in_one, "the AI must choose the mating move");
+
+	int failed = tester.run_tests();
+	if (failed == 0) print("ALL TESTS PASSED");
+	else print(failed + " TEST(S) FAILED");
+	return failed > 0 ? 1 : 0;
 }

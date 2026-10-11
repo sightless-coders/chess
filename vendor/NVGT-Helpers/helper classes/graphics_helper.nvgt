@@ -1,0 +1,192 @@
+//helper for the graphics plugin
+#pragma plugin graphics
+#include"dget.nvgt"
+class graphics_helper
+{
+dictionary imiges;
+uint64 handle;
+bool active;
+int r;
+int g;
+int b;
+bool auto_colors;
+graphics_renderer renderer;
+color white(255 ,255 ,255);
+color black(0, 0,0 );
+color red(255, 0, 0);
+color green(0, 255, 0);
+color blue(0,0, 255);
+color gray(128, 128, 128);
+color yellow(255, 255, 0);
+pazition top_left(20,20);
+pazition top_center(400,20);
+pazition center(400 ,300);
+pazition bottom_left(20, 560);
+pazition bottom_center(400, 560);
+//Constructer. You can choose to set the r, g, and b values of the script witch if you have auto_colors enabled, will automaticly fill out those values where ever you may needthem.
+graphics_helper(int r, int g, int b, bool colors)
+{
+handle = get_window_os_handle();
+this.r = r;
+this.g = g;
+this.b = b;
+auto_colors = colors;
+active = renderer.setup(handle);
+}
+//use this if you want to disable auto_colors
+graphics_helper()
+{
+handle = get_window_os_handle();
+auto_colors = false;
+active = renderer.setup(handle);
+}
+//You have to call this every frame to put graphics on screen.
+void update()
+{
+renderer.present();
+}
+bool get_active()
+{
+return active;
+}
+int load_imige(string filename)
+{
+int id = renderer.load_image(filename);
+imiges.set(filename,id);
+return id;
+}
+//This function allows you to get the ID of any filename. This is done by pulling it out of the dictionary of loaded filenames. You can do this for any function that takes a ID.
+int get_id(string filename)
+{
+return dgetn(imiges,filename);
+}
+void draw_image(int id,int x, int y, int w, int h)
+{
+renderer.draw_image(id,x,y,w,h);
+}
+void draw_image(string filename,int x,int y,int w,int h)
+{
+renderer.draw_image(dgetn(imiges,filename),x,y,w,h);
+}
+void draw_image_region(int id,int x,int y,int w,int h,int sx, int sy, int sw, int sh)
+{
+renderer.draw_image_region(id,x,y,w,h,sx,sy,sw,sh);
+}
+void draw_image_region(string filename, int x,int y,int w,int h,int sx, int sy, int sw, int sh)
+{
+renderer.draw_image_region(dgetn(imiges,filename),x,y,w,h,sx,sy,sw,sh);
+}
+void set_font(string name,float size, bool bold, bool italic)
+{
+renderer.set_font(name,size,bold,italic);
+}
+//any function that takes rgb values allows you to either input the values , or use auto_colors. The functions that use auto_colors will return false if auto_colors is disabled.
+void draw_text(string text, int x, int y, int r, int g, int b)
+{
+renderer.draw_text(text,x,y,r,g,b);
+}
+bool draw_text(string text, int x, int y)
+{
+if(auto_colors)
+{
+renderer.draw_text(text,x,y,r,g,b);
+return true;
+}
+else
+{
+return false;
+}
+}
+//You can pass any color object. There are color objects that contain the rgb values.
+void draw_text(string text, int x, int y,color @c)
+{
+renderer.draw_text(text,x,y,c.r,c.g,c.b);
+}
+//This function needs a color and paiziton objects, both of witch contain the data.
+void draw_text(string text, pazition @p, color @c)
+{
+renderer.draw_text(text,p.x,p.y,c.r,c.g,c.b);
+}
+void draw_text_wrapped(string text, int x, int y, int w, int r, int g, int b)
+{
+renderer.draw_text_wrapped(text,x,y,w,r,g,b);
+}
+bool draw_text_wrapped(string text, int x,int y,int w)
+{
+if(auto_colors)
+{
+renderer.draw_text_wrapped(text,x,y,w,r,g,b);
+return true;
+}
+else
+{
+return false;
+}
+}
+void clear_screen(int r, int g, int b)
+{
+renderer.clear_screen(r,g,b);
+}
+bool clear_screen()
+{
+if(auto_colors)
+{
+renderer.clear_screen(r,g,b);
+return true;
+}
+else
+{
+return false;
+}
+}
+void draw_menu(string items, int index, int x, int y)
+{
+renderer.draw_menu(items,index,x,y);
+}
+//This function allows you to draw a menu using a array of items instead of a string. The function will parse the array into a string for you.
+void draw_menu(string[]@items, int index, int x, int y)
+{
+string new_items = join(items,"|");
+renderer.draw_menu(new_items,index,x,y);
+}
+void draw_line(int x1, int y1, int x2, int y2, int r, int g, int b, int thickness)
+{
+renderer.draw_line(x1,y1,x2,y2,r,g,b,thickness);
+}
+bool draw_line(int x1, int x2, int y1, int y2, int thickness)
+{
+if(auto_colors)
+{
+renderer.draw_line(x1,x2,y1,y2,r,g,b,thickness);
+return true;
+}
+else
+{
+return false;
+}
+}
+}
+//helper class
+class color
+{
+int r;
+int g;
+int b;
+color(int r, int g, int b)
+{
+this.r = r;
+this.g = g;
+this.b = b;
+}
+
+}
+class pazition
+{
+int x;
+int y;
+pazition(int x, int y)
+{
+this.x = x;
+this.y = y;
+}
+}

@@ -1,0 +1,23 @@
+#include"voice_commands_helper.nvgt"
+voice_command_helper voice();
+void main()
+{
+show_window("tester");
+voice.add_phrays("test");
+voice.add_phrays("fire");
+while(true)
+{
+wait(5);
+
+string cmd = voice.get_last_command();
+if(cmd == "test")
+{
+screen_reader_speak("test");
+}
+else  if(cmd == "fire")
+{
+screen_reader_speak("fire!");
+alert("gun","fire!");
+}
+}
+}

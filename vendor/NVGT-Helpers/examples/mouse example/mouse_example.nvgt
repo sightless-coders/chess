@@ -1,0 +1,20 @@
+#include "mouse_helper.nvgt"
+mouse m;
+void main()
+{
+show_window("Mouse Example");
+while(true)
+{
+wait(5);
+m.update();
+if(m.pressed(MOUSE_LEFT))
+{
+screen_reader_speak("left click was pressed");
+}
+else if(m.down(MOUSE_MIDDLE))
+{
+screen_reader_speak("the scrol wiel is being held down");
+}
+
+}
+}

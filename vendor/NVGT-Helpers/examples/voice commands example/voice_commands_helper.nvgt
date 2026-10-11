@@ -1,0 +1,93 @@
+#pragma plugin voice_command
+class voice_command_helper
+{
+bool active;
+string last_cmd;
+bool started = false;
+voice_recognizer v;
+voice_command_helper()
+{
+active = v.setup();
+if(active == true)
+{
+v.start();
+started = true;
+}
+}
+void update()
+{
+last_cmd = v.get_command();
+}
+bool add_phrays(string phrays)
+{
+string new_phrays;
+if(phrays.find("*") != -1)
+{
+new_phrays = phrays.replace("*","");
+return v.add_command(new_phrays);
+}
+return v.add_command(phrays);
+}
+bool add_dictation(string prefix)
+{
+return v.add_command(prefix+" *");
+}
+void clear_all()
+{
+v.clear_commands();
+}
+bool start()
+{
+if(started == false)
+{
+v.start();
+started=  true;
+return true;
+}
+else
+{
+return false;
+}
+}
+bool stop()
+{
+if(started == true)
+{
+v.stop();
+started = false;
+return true;
+}
+else
+{
+return false;
+}
+}
+bool get_active()
+{
+return active;
+}
+bool get_started()
+{
+return started;
+}
+int waiting_commands()
+{
+return v.get_commands_pending();
+}
+string get_last_command()
+{
+return v.get_command();
+}
+void clear_waiting_commands()
+{
+v.clear_queue();
+}
+int get_error_countt()
+{
+return v.get_error_count();
+}
+void reset_errors()
+{
+v.reset_error_count();
+}
+}
